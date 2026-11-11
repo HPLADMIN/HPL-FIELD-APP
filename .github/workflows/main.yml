@@ -16,17 +16,19 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Build Final HPL Field App APK
+      - name: Build HPL Pro Field App APK
         run: |
+          # 1. Fresh Project
           flutter create --org com.hplinfra hpl_field_app
           cd hpl_field_app
 
-          # Dependencies
+          # 2. Add Plugins
           flutter pub add http geolocator image_picker shared_preferences intl
 
-          # Permissions
+          # 3. Safe Android Permissions
           sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n<uses-permission android:name="android.permission.CAMERA"/>' android/app/src/main/AndroidManifest.xml
 
+          # 4. Injected Pure 6-Stage Dart Code
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
           import 'dart:convert';
@@ -164,7 +166,7 @@ jobs:
             }
           }
 
-          // PRO DASHBOARD
+          // MAIN PRO DASHBOARD
           class ProDashboard extends StatefulWidget {
             final int userId;
             final String userName;
@@ -181,7 +183,9 @@ jobs:
             bool isDayCompleted = false;
             List<dynamic> myTasks = [];
             List<dynamic> filteredTasks = [];
-            String selectedStageFilter = "All";
+            String selectedFilter = "All";
+            List<dynamic> chatMessages = [];
+            final chatCtrl = TextEditingController();
             Timer? offlineGpsTimer;
             int presentDays = 0, absentDays = 0, leavesCount = 0;
 
@@ -192,6 +196,7 @@ jobs:
               _checkPersistentAttendance();
               _fetchTasks();
               _fetchRealAttendance();
+              _fetchChat();
               _startOfflineGpsBreadcrumbs();
             }
 
@@ -207,7 +212,7 @@ jobs:
               setState(() => currentGps = pos);
             }
 
-            // 1. PERSISTENT ATTENDANCE STATE (Stays 'DUTY ACTIVE' on Re-login)
+            // 1. PERSISTENT ATTENDANCE (No Re-punch on Re-login)
             void _checkPersistentAttendance() async {
               SharedPreferences p = await SharedPreferences.getInstance();
               String today = DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -229,7 +234,7 @@ jobs:
               } catch (_) {}
             }
 
-            // 2. OFFLINE BREADCRUMB GPS LOGGER (Logs every 5 min locally & auto-syncs)
+            // 2. OFFLINE GPS BREADCRUMB LOGGER (Every 5 mins)
             void _startOfflineGpsBreadcrumbs() {
               offlineGpsTimer = Timer.periodic(const Duration(minutes: 5), (t) async {
                 try {
@@ -239,7 +244,6 @@ jobs:
                   route.add(jsonEncode({'lat': pos.latitude, 'lng': pos.longitude, 'time': DateFormat('HH:mm:ss').format(DateTime.now())}));
                   await p.setStringList('gps_route', route);
 
-                  // Auto sync if network present
                   if (route.length >= 3) {
                     var pts = route.map((e) => jsonDecode(e)).toList();
                     var res = await http.post(
@@ -274,7 +278,7 @@ jobs:
                 await p.setBool('punched_in', true);
                 await p.setString('punch_date', DateFormat('yyyy-MM-dd').format(DateTime.now()));
                 setState(() => isPunchedIn = true);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Duty Active! Selfie stamped with GPS Lat/Long."), backgroundColor: Colors.green));
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Punch-In Done! GPS Stamped on Selfie."), backgroundColor: Colors.green));
               }
             }
 
@@ -301,19 +305,19 @@ jobs:
                 if (j['status'] == true) {
                   setState(() {
                     myTasks = j['tasks'];
-                    _filterTasks("All");
+                    _applyTaskFilter("All");
                   });
                 }
               } catch (_) {}
             }
 
-            void _filterTasks(String stage) {
+            void _applyTaskFilter(String stg) {
               setState(() {
-                selectedStageFilter = stage;
-                if (stage == "All") {
+                selectedFilter = stg;
+                if (stg == "All") {
                   filteredTasks = myTasks;
                 } else {
-                  filteredTasks = myTasks.where((t) => (t['task_type'] ?? '').toString().contains(stage)).toList();
+                  filteredTasks = myTasks.where((t) => (t['task_type'] ?? '').toString().contains(stg)).toList();
                 }
               });
             }
@@ -330,6 +334,26 @@ jobs:
                   });
                 }
               } catch (_) {}
+            }
+
+            void _fetchChat() async {
+              try {
+                var res = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_chat_messages"));
+                var j = jsonDecode(res.body);
+                if (j['status'] == true) setState(() => chatMessages = j['messages']);
+              } catch (_) {}
+            }
+
+            void _sendChat() async {
+              if (chatCtrl.text.trim().isEmpty) return;
+              var txt = chatCtrl.text.trim();
+              chatCtrl.clear();
+              await http.post(Uri.parse("$BASE_URL/field_app_api.php?action=send_chat_message"), body: {
+                'sender_id': widget.userId.toString(),
+                'sender_name': widget.userName,
+                'message': txt,
+              });
+              _fetchChat();
             }
 
             @override
@@ -362,16 +386,20 @@ jobs:
                   children: [
                     _buildDutyTab(),
                     _buildTasksTab(),
-                    _buildCalendarTab(),
+                    _buildChatTab(),
+                    _buildAttendanceTab(),
                   ],
                 ),
                 bottomNavigationBar: BottomNavigationBar(
                   currentIndex: currentTab,
                   onTap: (i) => setState(() => currentTab = i),
                   selectedItemColor: Colors.indigo,
+                  unselectedItemColor: Colors.grey,
+                  type: BottomNavigationBarType.fixed,
                   items: const [
                     BottomNavigationBarItem(icon: Icon(Icons.camera_front), label: "Selfie Duty"),
                     BottomNavigationBarItem(icon: Icon(Icons.assignment), label: "My Tasks"),
+                    BottomNavigationBarItem(icon: Icon(Icons.chat), label: "Team Chat"),
                     BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: "Attendance"),
                   ],
                 ),
@@ -408,7 +436,7 @@ jobs:
                               ),
                             ),
                           const SizedBox(height: 8),
-                          const Text("Selfie will be watermarked with GPS Lat/Long & Timestamp", style: TextStyle(fontSize: 10, color: Colors.grey)),
+                          const Text("All captured photos are permanently stamped with GPS Lat/Long", style: TextStyle(fontSize: 10, color: Colors.grey)),
                         ],
                       ),
                     ),
@@ -420,7 +448,7 @@ jobs:
             Widget _buildTasksTab() {
               return Column(
                 children: [
-                  // Stage Filter Horizontal Bar
+                  // Horizontal Stage Filter Bar
                   Container(
                     height: 50,
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -428,14 +456,14 @@ jobs:
                     child: ListView(
                       scrollDirection: Axis.horizontal,
                       children: ["All", "Stage 1", "Stage 2", "Stage 3", "Stage 4", "Stage 5", "Stage 6"].map((stg) {
-                        bool sel = selectedStageFilter == stg;
+                        bool sel = selectedFilter == stg;
                         return Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 4),
                           child: ChoiceChip(
                             label: Text(stg, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: sel ? Colors.white : Colors.black87)),
                             selected: sel,
                             selectedColor: Colors.indigo,
-                            onSelected: (b) => _filterTasks(stg),
+                            onSelected: (b) => _applyTaskFilter(stg),
                           ),
                         );
                       }).toList(),
@@ -458,7 +486,7 @@ jobs:
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    // Task Stage Badge
+                                    // Stage Name Badge
                                     Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                       decoration: BoxDecoration(color: Colors.indigo.shade50, borderRadius: BorderRadius.circular(6), border: Border.all(color: Colors.indigo.shade200)),
@@ -496,7 +524,53 @@ jobs:
               );
             }
 
-            Widget _buildCalendarTab() {
+            Widget _buildChatTab() {
+              return Column(
+                children: [
+                  Expanded(
+                    child: ListView.builder(
+                      padding: const EdgeInsets.all(12),
+                      itemCount: chatMessages.length,
+                      itemBuilder: (ctx, i) {
+                        var m = chatMessages[i];
+                        bool isMe = m['sender_id'].toString() == widget.userId.toString();
+                        return Align(
+                          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: isMe ? Colors.indigo : Colors.white,
+                              borderRadius: BorderRadius.circular(10),
+                              boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 2)],
+                            ),
+                            child: Column(
+                              crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                              children: [
+                                Text(m['sender_name'] ?? 'User', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isMe ? Colors.white70 : Colors.indigo)),
+                                Text(m['message'] ?? '', style: TextStyle(color: isMe ? Colors.white : Colors.black87, fontSize: 13)),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    color: Colors.white,
+                    child: Row(
+                      children: [
+                        Expanded(child: TextField(controller: chatCtrl, decoration: const InputDecoration(hintText: "Type site update / team issue...", border: InputBorder.none))),
+                        IconButton(icon: const Icon(Icons.send, color: Colors.indigo), onPressed: _sendChat),
+                      ],
+                    ),
+                  )
+                ],
+              );
+            }
+
+            Widget _buildAttendanceTab() {
               return ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
@@ -525,7 +599,7 @@ jobs:
             }
           }
 
-          // DYNAMIC STAGE-SPECIFIC EXECUTION SCREEN (Only shows fields for that specific stage!)
+          // STAGE-SPECIFIC EXECUTION SCREEN (Only shows fields for that specific stage!)
           class StageExecutionScreen extends StatefulWidget {
             final int taskId;
             final int gpId;
@@ -601,55 +675,85 @@ jobs:
                         ),
                         const SizedBox(height: 14),
 
-                        // STAGE 1: UNLOADING
+                        // STAGE 1: MATERIAL UNLOADING
                         if (widget.taskStage.contains('Stage 1') || widget.taskStage.contains('Unloading')) ...[
-                          _photoTile('Unloaded_Material_Site', 'Unloaded Material at Site Photo *'),
-                          _photoTile('Delivery_Challan_Copy', 'Delivery Challan / Transporter Bilty Photo *'),
+                          _photoTile('Delivery_Challan_Copy', '1. Delivery Challan / Bilty Copy Photo *'),
+                          _photoTile('Unloaded_Material_Site', '2. Unloaded Material at Site Photo *'),
                         ]
-                        // STAGE 2: RACK & ACTIVE I&C
+                        // STAGE 2: RACK & ACTIVE I&C (ALL 10 SERIAL NUMBERS + PHOTOS)
                         else if (widget.taskStage.contains('Stage 2') || widget.taskStage.contains('Rack')) ...[
-                          _inputField('router_chassis_no', 'Router Chassis Serial No *'),
-                          _inputField('rack_sn', 'Rack Serial No *'),
-                          _inputField('ems_sn', 'EMS Serial No *'),
-                          _inputField('hups_sn', 'HUPS Serial No *'),
-                          _inputField('battery_sn', 'Battery Bank Serial No *'),
-                          _photoTile('Upper_Rack_Compartment', 'Upper Rack Compartment Photo *'),
-                          _photoTile('Lower_Rack_Compartment', 'Lower Rack Compartment Photo *'),
-                          _photoTile('Band_Rack_Front', 'Band Rack (Closed) Photo *'),
-                          _photoTile('Rack_Grouting_Base', 'Rack Grouting Base Foundation Photo *'),
+                          _snWithPhoto('router_chassis_no', 'photo_router_chassis', '1. Router Chassis Number *'),
+                          _snWithPhoto('router_barcode_sn', 'photo_router_barcode', '2. Router Barcode SN *'),
+                          _snWithPhoto('ems_sn', 'photo_ems_sn', '3. EMS Serial Number *'),
+                          _snWithPhoto('hups_sn', 'photo_hups_sn', '4. HUPS Serial Number *'),
+                          _snWithPhoto('inverter_500', 'photo_inverter_sn', '5. Inverter-500 Serial Number *'),
+                          _snWithPhoto('rectifier_1', 'photo_rectifier_1', '6. Rectifier Module 1 SN *'),
+                          _snWithPhoto('rectifier_2', 'photo_rectifier_2', '7. Rectifier Module 2 SN *'),
+                          _snWithPhoto('battery_sn', 'photo_battery_sn', '8. Battery Bank Serial Number *'),
+                          _snWithPhoto('bypass_filter', 'photo_bypass_filter', '9. Bypass Filter Serial Number *'),
+                          _snWithPhoto('rack_sn', 'photo_rack_sn', '10. Rack Serial Number *'),
+                          _snWithPhoto('solar_charger_sn', 'photo_solar_charger', '11. Solar Charger SN (If Solar Site)'),
                         ]
                         // STAGE 3: EARTHING
                         else if (widget.taskStage.contains('Stage 3') || widget.taskStage.contains('Earthing')) ...[
-                          _photoTile('Earth_Electrode_Pit', 'Earthing Pit Photo *'),
-                          _photoTile('Busbar_Termination_Strip', 'Copper Busbar & Strip Termination Photo *'),
-                          _photoTile('Earthing_Meter_Ohm_Reading', 'Earth Resistance Tester (Ohm Reading Photo) *'),
+                          _photoTile('Earth_Electrode_Pit', '1. Earth Electrode Pit Photo *'),
+                          _photoTile('Copper_Busbar_Strip', '2. Copper Busbar Strip Photo *'),
+                          _photoTile('Earthing_Strip_Termination', '3. Connected Earthing Strip Termination Photo *'),
                         ]
-                        // STAGE 4: SOLAR & CIVIL
+                        // STAGE 4: SOLAR INSTALLATION
                         else if (widget.taskStage.contains('Stage 4') || widget.taskStage.contains('Solar')) ...[
-                          _inputField('solar_panel_1', 'Solar Panel 1 Serial No *'),
-                          _inputField('solar_panel_2', 'Solar Panel 2 Serial No *'),
-                          _photoTile('Solar_Mounting_Structure', 'Solar Structure on Roof Photo *'),
-                          _photoTile('Civil_Foundation_Pedestal', 'Civil Concrete Pedestal Photo *'),
-                          _photoTile('Solar_Earthing_Lightning', 'Solar Earthing & Lightning Arrester Photo *'),
+                          _snWithPhoto('solar_panel_1', 'photo_solar_panel_1', '1. Solar Panel 1 Serial Number *'),
+                          _snWithPhoto('solar_panel_2', 'photo_solar_panel_2', '2. Solar Panel 2 Serial Number *'),
+                          _photoTile('Solar_Mounting_Structure', '3. Solar Mounting Structure on Roof Photo *'),
+                          _photoTile('Civil_Concrete_Pedestal', '4. Civil Concrete Pedestal Work Photo *'),
+                          _photoTile('Solar_Earthing_Pit', '5. Dedicated Solar Earthing Pit Photo *'),
                         ]
                         // STAGE 5: INTEGRATION & SFPS
                         else if (widget.taskStage.contains('Stage 5') || widget.taskStage.contains('Integration')) ...[
-                          _photoTile('Engineer_Selfie_Enclosure', 'Selfie with Installed Rack *'),
-                          _inputField('sfp_1', 'SFP 1 Electrical Serial No *'),
-                          _inputField('sfp_2', 'SFP 2 Optical (LR/ER) Serial No *'),
-                          _inputField('sfp_3', 'SFP 3 Optical (LR/ER) Serial No *'),
-                          _photoTile('Bypass_Filter_Patching', 'Bypass Filter Patching Photo *'),
-                          _photoTile('Router_LED_Link_Ping', 'Router LED Link & Ping Verification Photo *'),
+                          _photoTile('Engineer_Selfie_Rack', '1. Field Engineer Verification Selfie with Rack *'),
+                          _snWithPhoto('sfp_1', 'photo_sfp_electrical', '2. SFP 1 Electrical (Copper) SN *'),
+                          _snWithPhoto('sfp_2', 'photo_sfp_optical_1', '3. SFP 2 Optical (LR/ER) SN *'),
+                          _snWithPhoto('sfp_3', 'photo_sfp_optical_2', '4. SFP 3 Optical (LR/ER) SN *'),
+                          _photoTile('Bypass_Filter_Patching', '5. Bypass Filter Patching Photo *'),
+                          _photoTile('Optical_Patch_Cord_Dressing', '6. Optical Fiber Patch Cord Dressing Photo *'),
+                          _photoTile('Router_LED_Link_Ping', '7. Router LED Port Link Status & Active Ping Photo *'),
                         ]
-                        // STAGE 6: FAT & HANDOVER
+                        // STAGE 6: FAT / FINAL AT (INSPECTION + RETAKES OF STAGES 2, 3, 4, 5 + ALARMS)
                         else ...[
-                          _photoTile('Joint_Selfie_With_BSNL_Officer', 'Selfie with BSNL / IE Officer *'),
-                          _photoTile('Smoke_Detector_Alarm_Test', 'Smoke Alarm Test Photo *'),
-                          _photoTile('Water_Ingress_Sensor_Test', 'Water Ingress Sensor Photo *'),
-                          _photoTile('Door_Intrusion_Switch_Test', 'Door Intrusion Switch Alarm Photo *'),
-                          _photoTile('Noise_Meter_Ambient_Reading', 'Noise Meter Reading Photo *'),
-                          _inputField('fat_cert_no', 'FAT Certificate Number *'),
-                          _photoTile('Signed_WCC_Handover_Document', 'Signed WCC / Handover Document Photo *'),
+                          const Text("A. Joint Inspection & Structure Evidence", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                          _photoTile('Joint_Selfie_With_BSNL_Officer', '1. Joint Selfie with BSNL / IE Officer (FT/NE Team) *'),
+                          _photoTile('Khuli_Rack_Upper_Half', '2. Khuli Rack Upper Half Compartment Photo *'),
+                          _photoTile('Khuli_Rack_Lower_Half', '3. Khuli Rack Lower Half Compartment Photo *'),
+                          _photoTile('Band_Rack_Front_Closed', '4. Band Rack Front Profile (Closed) Photo *'),
+                          _photoTile('Foundation_Grouting_Base', '5. Foundation Grouting Base Photo *'),
+                          const Divider(),
+                          const Text("B. Fresh Retakes on FAT Date (GPS Watermark)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                          _photoTile('FAT_Retake_Router_Chassis', '6. Re-take: Router Chassis Plate Photo *'),
+                          _photoTile('FAT_Retake_EMS_SN', '7. Re-take: EMS SN Plate Photo *'),
+                          _photoTile('FAT_Retake_HUPS_SN', '8. Re-take: HUPS SN Plate Photo *'),
+                          _photoTile('FAT_Retake_Inverter_SN', '9. Re-take: Inverter SN Plate Photo *'),
+                          _photoTile('FAT_Retake_Rectifier_1_2', '10. Re-take: Rectifier Modules 1 & 2 Photos *'),
+                          _photoTile('FAT_Retake_Battery_Bank', '11. Re-take: Battery Bank SN Photo *'),
+                          _photoTile('FAT_Retake_Bypass_Filter', '12. Re-take: Bypass Filter SN Photo *'),
+                          _photoTile('FAT_Retake_Rack_SN', '13. Re-take: Rack SN Plate Photo *'),
+                          _photoTile('FAT_Retake_Earthing_Pit', '14. Re-take: Earth Electrode Pit Photo *'),
+                          _photoTile('FAT_Retake_Busbar_Strip', '15. Re-take: Copper Busbar Strip Photo *'),
+                          _photoTile('FAT_Retake_Solar_Panels', '16. Re-take: Solar Panels 1 & 2 Photos (If Solar)'),
+                          _photoTile('FAT_Retake_Solar_Mounting', '17. Re-take: Solar Mounting Structure on Roof (If Solar)'),
+                          _photoTile('FAT_Retake_SFPs_Patching', '18. Re-take: SFPs & Patching Routing Photo *'),
+                          _photoTile('FAT_Retake_Router_LED_Link', '19. Re-take: Router LED Link & Active Ping Photo *'),
+                          const Divider(),
+                          const Text("C. Testing, Sensor Alarms & Official Handover", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                          _photoTile('Earthing_Meter_Ohm_Reading', '20. Earth Resistance Tester (Ohm Reading on Display) *'),
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: TextField(controller: _getCtrl('earth_resistance_ohm'), decoration: const InputDecoration(labelText: "Measured Earth Resistance in Ohms (< 0.5 Ω) *", border: OutlineInputBorder())),
+                          ),
+                          _photoTile('Smoke_Detector_Alarm_Test', '21. Smoke Detector Alarm Test Photo *'),
+                          _photoTile('Water_Ingress_Sensor_Test', '22. Water Ingress / Moisture Sensor Photo *'),
+                          _photoTile('Door_Tamper_Alarm_Test', '23. Rack Door Close / Tamper Alarm Photo *'),
+                          _photoTile('Noise_Meter_Ambient_Reading', '24. Ambient Sound Level / Noise Meter (dB Reading) *'),
+                          _photoTile('Signed_WCC_Handover_Document', '25. Signed WCC / Handover Document Copy Photo *'),
                         ],
 
                         const SizedBox(height: 12),
@@ -660,7 +764,7 @@ jobs:
                           child: ElevatedButton.icon(
                             onPressed: _submit,
                             icon: const Icon(Icons.cloud_upload),
-                            label: const Text("SUBMIT STAGE WITH GPS STAMP", style: TextStyle(fontWeight: FontWeight.bold)),
+                            label: const Text("SUBMIT STAGE WITH GPS WATERMARK", style: TextStyle(fontWeight: FontWeight.bold)),
                             style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
                           ),
                         )
@@ -669,10 +773,34 @@ jobs:
               );
             }
 
-            Widget _inputField(String key, String label) {
-              return Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: TextField(controller: _getCtrl(key), decoration: InputDecoration(labelText: label, border: const OutlineInputBorder())),
+            Widget _snWithPhoto(String snKey, String photoTag, String label) {
+              bool done = photos[photoTag] != null;
+              return Card(
+                margin: const EdgeInsets.only(bottom: 10),
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      TextField(controller: _getCtrl(snKey), decoration: const InputDecoration(hintText: "Enter Serial Number", isDense: true, border: OutlineInputBorder())),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(done ? "✓ Barcode Photo Attached" : "Capture Barcode Photo (GPS)", style: TextStyle(fontSize: 11, color: done ? Colors.green : Colors.grey)),
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(backgroundColor: done ? Colors.green : Colors.indigo, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
+                            onPressed: () => _capture(photoTag),
+                            icon: const Icon(Icons.camera_alt, size: 14),
+                            label: Text(done ? "Retake" : "Capture", style: const TextStyle(fontSize: 11)),
+                          ),
+                        ],
+                      )
+                    ],
+                  ),
+                ),
               );
             }
 
@@ -682,9 +810,9 @@ jobs:
                 margin: const EdgeInsets.only(bottom: 8),
                 child: ListTile(
                   leading: Icon(done ? Icons.check_circle : Icons.camera_alt, color: done ? Colors.green : Colors.grey),
-                  title: Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                  title: Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                   trailing: ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: done ? Colors.green : Colors.indigo, foregroundColor: Colors.white),
+                    style: ElevatedButton.styleFrom(backgroundColor: done ? Colors.green : Colors.indigo, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
                     onPressed: () => _capture(tag),
                     child: Text(done ? "Retake" : "Capture", style: const TextStyle(fontSize: 11)),
                   ),
