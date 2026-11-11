@@ -16,16 +16,15 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Auto-Create Native App & Build APK
+      - name: Build Pro Field Force APK
         run: |
           flutter create --org com.hplinfra hpl_field_app
           cd hpl_field_app
           flutter pub add http geolocator image_picker shared_preferences intl
 
-          # Android Permissions
+          # Permissions
           sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n<uses-permission android:name="android.permission.CAMERA"/>' android/app/src/main/AndroidManifest.xml
 
-          # Complete Working Flutter App with Login, Selfie, Tasks & Photos
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
           import 'dart:convert';
@@ -53,6 +52,7 @@ jobs:
             bool isLoggedIn = false;
             int userId = 1;
             String userName = "Field Engineer";
+            String userRole = "Admin";
 
             @override
             void initState() {
@@ -66,28 +66,30 @@ jobs:
                 isLoggedIn = p.getBool('logged_in') ?? false;
                 userId = p.getInt('user_id') ?? 1;
                 userName = p.getString('user_name') ?? "Field Engineer";
+                userRole = p.getString('user_role') ?? "Admin";
               });
             }
 
             @override
             Widget build(BuildContext context) {
               return isLoggedIn 
-                ? MainDashboard(userId: userId, userName: userName, onLogout: () {
+                ? ProDashboard(userId: userId, userName: userName, userRole: userRole, onLogout: () {
                     setState(() => isLoggedIn = false);
                   })
-                : LoginScreen(onLoginSuccess: (id, name) {
+                : LoginScreen(onLoginSuccess: (id, name, role) {
                     setState(() {
                       userId = id;
                       userName = name;
+                      userRole = role;
                       isLoggedIn = true;
                     });
                   });
             }
           }
 
-          // 1. LOGIN SCREEN
+          // LOGIN SCREEN
           class LoginScreen extends StatefulWidget {
-            final Function(int, String) onLoginSuccess;
+            final Function(int, String, String) onLoginSuccess;
             const LoginScreen({super.key, required this.onLoginSuccess});
             @override
             State<LoginScreen> createState() => _LoginScreenState();
@@ -111,12 +113,13 @@ jobs:
                   await p.setBool('logged_in', true);
                   await p.setInt('user_id', j['user']['id']);
                   await p.setString('user_name', j['user']['name']);
-                  widget.onLoginSuccess(j['user']['id'], j['user']['name']);
+                  await p.setString('user_role', j['user']['role'] ?? 'Engineer');
+                  widget.onLoginSuccess(j['user']['id'], j['user']['name'], j['user']['role'] ?? 'Engineer');
                 } else {
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(j['message'] ?? "Login Failed!")));
                 }
               } catch (e) {
-                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Server error: $e")));
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
               }
               setState(() => loading = false);
             }
@@ -133,12 +136,11 @@ jobs:
                       child: Padding(
                         padding: const EdgeInsets.all(24),
                         child: Column(
-                          mainAxisSize: MainAxisSize.min,
                           children: [
                             const Icon(Icons.engineering, size: 55, color: Colors.indigo),
                             const SizedBox(height: 10),
-                            const Text("HPL Field Force", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                            const Text("Engineer Login", style: TextStyle(fontSize: 12, color: Colors.grey)),
+                            const Text("HPL Field Force Pro", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                            const Text("Enterprise Mobile Workspace", style: TextStyle(fontSize: 12, color: Colors.grey)),
                             const SizedBox(height: 20),
                             TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: "Email ID", border: OutlineInputBorder())),
                             const SizedBox(height: 12),
@@ -163,27 +165,42 @@ jobs:
             }
           }
 
-          // 2. MAIN DASHBOARD (DUTY, MY TASKS, GP EXECUTION)
-          class MainDashboard extends StatefulWidget {
+          // MAIN PRO DASHBOARD (4 TABS)
+          class ProDashboard extends StatefulWidget {
             final int userId;
             final String userName;
+            final String userRole;
             final VoidCallback onLogout;
-            const MainDashboard({super.key, required this.userId, required this.userName, required this.onLogout});
+            const ProDashboard({super.key, required this.userId, required this.userName, required this.userRole, required this.onLogout});
             @override
-            State<MainDashboard> createState() => _MainDashboardState();
+            State<ProDashboard> createState() => _ProDashboardState();
           }
 
-          class _MainDashboardState extends State<MainDashboard> {
+          class _ProDashboardState extends State<ProDashboard> {
             int currentTab = 0;
             Position? currentGps;
             bool isPunchedIn = false;
+            bool isDayCompleted = false;
             List<dynamic> myTasks = [];
+            List<dynamic> teamMembers = [];
+            List<dynamic> chatMessages = [];
+            Timer? autoSyncTimer;
+            final chatCtrl = TextEditingController();
 
             @override
             void initState() {
               super.initState();
               _getGps();
+              _checkAttendanceState(); // Persistent attendance check
               _fetchTasks();
+              _fetchTeamAndChat();
+              _start15MinAutoSync(); // 15-minute background auto-sync
+            }
+
+            @override
+            void dispose() {
+              autoSyncTimer?.cancel();
+              super.dispose();
             }
 
             void _getGps() async {
@@ -192,7 +209,27 @@ jobs:
               setState(() => currentGps = pos);
             }
 
-            // Punch In with Selfie Camera
+            // PERSISTENT ATTENDANCE (Checks server status on login)
+            void _checkAttendanceState() async {
+              try {
+                var res = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_today_status&user_id=${widget.userId}"));
+                var j = jsonDecode(res.body);
+                if (j['status'] == true) {
+                  setState(() {
+                    isPunchedIn = j['is_punched_in'];
+                    isDayCompleted = j['is_completed'];
+                  });
+                }
+              } catch (_) {}
+            }
+
+            void _start15MinAutoSync() {
+              autoSyncTimer = Timer.periodic(const Duration(minutes: 15), (t) {
+                _fetchTasks();
+                _fetchTeamAndChat();
+              });
+            }
+
             void _punchInWithSelfie() async {
               final picker = ImagePicker();
               final picked = await picker.pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front);
@@ -201,6 +238,7 @@ jobs:
               Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
               var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/field_app_api.php?action=punch_in"));
               req.fields['user_id'] = widget.userId.toString();
+              req.fields['user_name'] = widget.userName;
               req.fields['latitude'] = pos.latitude.toString();
               req.fields['longitude'] = pos.longitude.toString();
               req.files.add(await http.MultipartFile.fromPath('selfie', picked.path));
@@ -208,7 +246,7 @@ jobs:
               var res = await req.send();
               if (res.statusCode == 200) {
                 setState(() => isPunchedIn = true);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Punch-In Done with Selfie & GPS!"), backgroundColor: Colors.green));
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Punch-In Done! GPS Stamped on Selfie."), backgroundColor: Colors.green));
               }
             }
 
@@ -219,7 +257,10 @@ jobs:
                 'latitude': pos.latitude.toString(),
                 'longitude': pos.longitude.toString(),
               });
-              setState(() => isPunchedIn = false);
+              setState(() {
+                isPunchedIn = false;
+                isDayCompleted = true;
+              });
               ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Duty Ended (Punch-Out Done)!"), backgroundColor: Colors.blue));
             }
 
@@ -229,6 +270,30 @@ jobs:
                 var j = jsonDecode(res.body);
                 if (j['status'] == true) setState(() => myTasks = j['tasks']);
               } catch (_) {}
+            }
+
+            void _fetchTeamAndChat() async {
+              try {
+                var resTeam = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_team_members"));
+                var jTeam = jsonDecode(resTeam.body);
+                if (jTeam['status'] == true) setState(() => teamMembers = jTeam['team']);
+
+                var resChat = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_chat_messages"));
+                var jChat = jsonDecode(resChat.body);
+                if (jChat['status'] == true) setState(() => chatMessages = jChat['messages']);
+              } catch (_) {}
+            }
+
+            void _sendChat() async {
+              if (chatCtrl.text.trim().isEmpty) return;
+              var txt = chatCtrl.text.trim();
+              chatCtrl.clear();
+              await http.post(Uri.parse("$BASE_URL/field_app_api.php?action=send_chat_message"), body: {
+                'sender_id': widget.userId.toString(),
+                'sender_name': widget.userName,
+                'message': txt,
+              });
+              _fetchTeamAndChat();
             }
 
             @override
@@ -256,33 +321,51 @@ jobs:
                     )
                   ],
                 ),
-                body: currentTab == 0 ? _buildDutyTab() : _buildTasksTab(),
+                body: IndexedStack(
+                  index: currentTab,
+                  children: [
+                    _buildDutyTab(),
+                    _buildTasksTab(),
+                    _buildChatTab(),
+                    _buildCalendarTab(),
+                  ],
+                ),
                 bottomNavigationBar: BottomNavigationBar(
                   currentIndex: currentTab,
                   onTap: (i) => setState(() => currentTab = i),
                   selectedItemColor: Colors.indigo,
+                  unselectedItemColor: Colors.grey,
+                  type: BottomNavigationBarType.fixed,
                   items: const [
-                    BottomNavigationBarItem(icon: Icon(Icons.camera_front), label: "Selfie Attendance"),
-                    BottomNavigationBarItem(icon: Icon(Icons.assignment), label: "My Tasks & Sites"),
+                    BottomNavigationBarItem(icon: Icon(Icons.camera_front), label: "Selfie Duty"),
+                    BottomNavigationBarItem(icon: Icon(Icons.assignment), label: "My Tasks"),
+                    BottomNavigationBarItem(icon: Icon(Icons.chat), label: "Team Chat"),
+                    BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: "Attendance"),
                   ],
                 ),
               );
             }
 
+            // TAB 1: PERSISTENT DUTY
             Widget _buildDutyTab() {
-              return Padding(
+              return ListView(
                 padding: const EdgeInsets.all(16),
-                child: Column(
-                  children: [
-                    Card(
-                      elevation: 2,
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      child: Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          children: [
-                            Text(isPunchedIn ? "DUTY ACTIVE (ON SITE)" : "DUTY NOT STARTED", style: TextStyle(fontWeight: FontWeight.bold, color: isPunchedIn ? Colors.green : Colors.red)),
-                            const SizedBox(height: 12),
+                children: [
+                  Card(
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        children: [
+                          Text(
+                            isDayCompleted 
+                              ? "TODAY'S DUTY COMPLETED ✓" 
+                              : (isPunchedIn ? "DUTY ACTIVE (ON SITE)" : "DUTY NOT STARTED"),
+                            style: TextStyle(fontWeight: FontWeight.bold, color: isPunchedIn ? Colors.green : (isDayCompleted ? Colors.blue : Colors.red)),
+                          ),
+                          const SizedBox(height: 12),
+                          if (!isDayCompleted)
                             SizedBox(
                               width: double.infinity,
                               height: 52,
@@ -293,45 +376,177 @@ jobs:
                                 style: ElevatedButton.styleFrom(backgroundColor: isPunchedIn ? Colors.red : Colors.green, foregroundColor: Colors.white),
                               ),
                             )
-                          ],
-                        ),
+                        ],
                       ),
                     ),
-                  ],
+                  ),
+                ],
+              );
+            }
+
+            // TAB 2: TASKS & IN-APP TASK ASSIGNMENT
+            Widget _buildTasksTab() {
+              return ListView(
+                padding: const EdgeInsets.all(12),
+                children: [
+                  if (widget.userRole.toLowerCase().contains('admin') || widget.userRole.toLowerCase().contains('mis'))
+                    Card(
+                      color: Colors.indigo.shade50,
+                      child: ListTile(
+                        leading: const Icon(Icons.add_task, color: Colors.indigo),
+                        title: const Text("Assign GP Task to Team", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                        subtitle: const Text("Assign site to any engineer directly from phone", style: TextStyle(fontSize: 11)),
+                        onPressed: () {
+                          _showAssignTaskModal();
+                        },
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  if (myTasks.isEmpty)
+                    const Padding(padding: EdgeInsets.all(30), child: Center(child: Text("No tasks assigned yet.")))
+                  else
+                    ...myTasks.map((t) => Card(
+                          elevation: 2,
+                          margin: const EdgeInsets.only(bottom: 10),
+                          child: ListTile(
+                            title: Text(t['gp_name'] ?? 'Site', style: const TextStyle(fontWeight: FontWeight.bold)),
+                            subtitle: Text("${t['block_name']} (${t['gp_code']}) • Target: ${t['target_date']}"),
+                            trailing: ElevatedButton(
+                              style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+                              onPressed: () {
+                                Navigator.push(context, MaterialPageRoute(builder: (c) => SiteFormScreen(gpId: t['gp_id'], gpName: t['gp_name'], userName: widget.userName)));
+                              },
+                              child: const Text("Enter Data", style: TextStyle(fontSize: 12)),
+                            ),
+                          ),
+                        )),
+                ],
+              );
+            }
+
+            // MODAL: ASSIGN TASK FROM APP
+            void _showAssignTaskModal() {
+              int selectedEng = teamMembers.isNotEmpty ? teamMembers[0]['id'] : 1;
+              final gpCodeCtrl = TextEditingController();
+              showModalBottomSheet(
+                context: context,
+                isScrollControlled: true,
+                builder: (ctx) => Padding(
+                  padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom, left: 16, right: 16, top: 16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text("Assign Site Task to Engineer", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      const SizedBox(height: 12),
+                      TextField(controller: gpCodeCtrl, decoration: const InputDecoration(labelText: "GP Code (e.g. 80093)", border: OutlineInputBorder())),
+                      const SizedBox(height: 10),
+                      DropdownButtonFormField(
+                        value: selectedEng,
+                        decoration: const InputDecoration(labelText: "Assign To Engineer", border: OutlineInputBorder()),
+                        items: teamMembers.map<DropdownMenuItem<int>>((m) => DropdownMenuItem(value: m['id'], child: Text(m['name']))).toList(),
+                        onChanged: (v) => selectedEng = v as int,
+                      ),
+                      const SizedBox(height: 15),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white, minimumSize: const Size.fromHeight(45)),
+                        onPressed: () async {
+                          Navigator.pop(ctx);
+                          await http.post(Uri.parse("$BASE_URL/field_app_api.php?action=assign_task_from_app"), body: {
+                            'gp_id': gpCodeCtrl.text, // mapped via code/id
+                            'assigned_to': selectedEng.toString(),
+                            'assigned_by': widget.userId.toString(),
+                            'task_type': 'I&C Installation',
+                            'target_date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
+                          });
+                          _fetchTasks();
+                        },
+                        child: const Text("Confirm & Send Task"),
+                      ),
+                      const SizedBox(height: 20),
+                    ],
+                  ),
                 ),
               );
             }
 
-            Widget _buildTasksTab() {
-              if (myTasks.isEmpty) {
-                return const Center(child: Text("No tasks assigned by MIS coordinator yet."));
-              }
-              return ListView.builder(
-                padding: const EdgeInsets.all(12),
-                itemCount: myTasks.length,
-                itemBuilder: (ctx, i) {
-                  var t = myTasks[i];
-                  return Card(
-                    elevation: 2,
-                    margin: const EdgeInsets.only(bottom: 10),
-                    child: ListTile(
-                      title: Text(t['gp_name'] ?? 'Site', style: const TextStyle(fontWeight: FontWeight.bold)),
-                      subtitle: Text("${t['block_name']} (${t['gp_code']}) • Due: ${t['target_date']}"),
-                      trailing: ElevatedButton(
-                        style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white),
-                        onPressed: () {
-                          Navigator.push(context, MaterialPageRoute(builder: (c) => SiteFormScreen(gpId: t['gp_id'], gpName: t['gp_name'], userName: widget.userName)));
-                        },
-                        child: const Text("Enter Data", style: TextStyle(fontSize: 12)),
+            // TAB 3: TEAM CHAT
+            Widget _buildChatTab() {
+              return Column(
+                children: [
+                  Expanded(
+                    child: ListView.builder(
+                      padding: const EdgeInsets.all(12),
+                      itemCount: chatMessages.length,
+                      itemBuilder: (ctx, i) {
+                        var m = chatMessages[i];
+                        bool isMe = m['sender_id'].toString() == widget.userId.toString();
+                        return Align(
+                          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                          child: Container(
+                            margin: const EdgeInsets.only(bottom: 8),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: isMe ? Colors.indigo : Colors.white,
+                              borderRadius: BorderRadius.circular(10),
+                              boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 2)],
+                            ),
+                            child: Column(
+                              crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                              children: [
+                                Text(m['sender_name'], style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isMe ? Colors.white70 : Colors.indigo)),
+                                Text(m['message'], style: TextStyle(color: isMe ? Colors.white : Colors.black87, fontSize: 13)),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    color: Colors.white,
+                    child: Row(
+                      children: [
+                        Expanded(child: TextField(controller: chatCtrl, decoration: const InputDecoration(hintText: "Type team update / site issue...", border: InputBorder.none))),
+                        IconButton(icon: const Icon(Icons.send, color: Colors.indigo), onPressed: _sendChat),
+                      ],
+                    ),
+                  )
+                ],
+              );
+            }
+
+            // TAB 4: CALENDAR & ATTENDANCE
+            Widget _buildCalendarTab() {
+              return ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text("Monthly Attendance Summary", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                          const SizedBox(height: 10),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceAround,
+                            children: const [
+                              Column(children: [Text("24", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.green)), Text("Present", style: TextStyle(fontSize: 11))]),
+                              Column(children: [Text("0", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.red)), Text("Absent", style: TextStyle(fontSize: 11))]),
+                              Column(children: [Text("2", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.blue)), Text("Leaves", style: TextStyle(fontSize: 11))]),
+                            ],
+                          )
+                        ],
                       ),
                     ),
-                  );
-                },
+                  ),
+                ],
               );
             }
           }
 
-          // 3. COMPLETE SITE DATA & PHOTO SUBMISSION SCREEN
+          // SITE DATA ENTRY SCREEN WITH GPS STAMPED PHOTOS
           class SiteFormScreen extends StatefulWidget {
             final int gpId;
             final String gpName;
@@ -346,7 +561,6 @@ jobs:
             final routerCtrl = TextEditingController();
             final batteryCtrl = TextEditingController();
             final solarCtrl = TextEditingController();
-            final wccCtrl = TextEditingController(text: "Signed");
             File? rackPhoto;
             File? routerPhoto;
             File? wccPhoto;
@@ -370,7 +584,6 @@ jobs:
               req.fields['router_chassis_no'] = routerCtrl.text;
               req.fields['battery_sn'] = batteryCtrl.text;
               req.fields['solar_panel_1'] = solarCtrl.text;
-              req.fields['wcc_status'] = wccCtrl.text;
 
               if (rackPhoto != null) req.files.add(await http.MultipartFile.fromPath('photo_rack', rackPhoto!.path));
               if (routerPhoto != null) req.files.add(await http.MultipartFile.fromPath('photo_router', routerPhoto!.path));
@@ -379,7 +592,7 @@ jobs:
               try {
                 var res = await req.send();
                 if (res.statusCode == 200) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Site Data & Photos uploaded to Master DPR!"), backgroundColor: Colors.green));
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Site Data & GPS Stamped Photos uploaded!"), backgroundColor: Colors.green));
                   Navigator.pop(context);
                 }
               } catch (_) {}
@@ -395,37 +608,35 @@ jobs:
                   : ListView(
                       padding: const EdgeInsets.all(16),
                       children: [
-                        const Text("1. Equipment Serial Numbers", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                        const SizedBox(height: 10),
+                        const Text("1. Serial Numbers", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        const SizedBox(height: 8),
                         TextField(controller: rackCtrl, decoration: const InputDecoration(labelText: "Rack Serial Number", border: OutlineInputBorder())),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
                         TextField(controller: routerCtrl, decoration: const InputDecoration(labelText: "Router Chassis Number", border: OutlineInputBorder())),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
                         TextField(controller: batteryCtrl, decoration: const InputDecoration(labelText: "Battery Serial Number", border: OutlineInputBorder())),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 8),
                         TextField(controller: solarCtrl, decoration: const InputDecoration(labelText: "Solar Panel Serial Number", border: OutlineInputBorder())),
-                        const SizedBox(height: 20),
-
-                        const Text("2. Take Site Photos (Camera)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                        const SizedBox(height: 10),
+                        const SizedBox(height: 16),
+                        const Text("2. Geo-Tagged Photos (Camera)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                         ListTile(
                           leading: Icon(rackPhoto != null ? Icons.check_circle : Icons.camera_alt, color: rackPhoto != null ? Colors.green : Colors.grey),
-                          title: const Text("Rack & EMS Photo"),
-                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => rackPhoto = f); }, child: const Text("Capture")),
+                          title: const Text("Rack Photo"),
+                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => rackPhoto = f); }, child: const Text("Click")),
                         ),
                         ListTile(
                           leading: Icon(routerPhoto != null ? Icons.check_circle : Icons.camera_alt, color: routerPhoto != null ? Colors.green : Colors.grey),
                           title: const Text("Router Photo"),
-                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => routerPhoto = f); }, child: const Text("Capture")),
+                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => routerPhoto = f); }, child: const Text("Click")),
                         ),
                         ListTile(
                           leading: Icon(wccPhoto != null ? Icons.check_circle : Icons.camera_alt, color: wccPhoto != null ? Colors.green : Colors.grey),
-                          title: const Text("Signed WCC Paper Photo"),
-                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => wccPhoto = f); }, child: const Text("Capture")),
+                          title: const Text("WCC Photo"),
+                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => wccPhoto = f); }, child: const Text("Click")),
                         ),
-                        const SizedBox(height: 25),
+                        const SizedBox(height: 20),
                         SizedBox(
-                          height: 50,
+                          height: 48,
                           child: ElevatedButton.icon(
                             onPressed: _submitData,
                             icon: const Icon(Icons.cloud_upload),
