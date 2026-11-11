@@ -18,212 +18,428 @@ jobs:
 
       - name: Auto-Create Native App & Build APK
         run: |
-          # 1. Cloud me fresh Flutter project banayega
           flutter create --org com.hplinfra hpl_field_app
           cd hpl_field_app
+          flutter pub add http geolocator image_picker shared_preferences intl
 
-          # 2. Plugins add karega
-          flutter pub add http geolocator image_picker sqflite path_provider shared_preferences intl
-
-          # 3. Android Permissions inject karega
+          # Android Permissions
           sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n<uses-permission android:name="android.permission.CAMERA"/>' android/app/src/main/AndroidManifest.xml
 
-          # 4. Pure Native Offline Dart Code inject karega
+          # Complete Working Flutter App with Login, Selfie, Tasks & Photos
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
           import 'dart:convert';
+          import 'dart:io';
           import 'package:flutter/material.dart';
           import 'package:geolocator/geolocator.dart';
           import 'package:image_picker/image_picker.dart';
           import 'package:http/http.dart' as http;
           import 'package:shared_preferences/shared_preferences.dart';
-          import 'package:intl/intl.dart';
-          import 'package:sqflite/sqflite.dart';
-          import 'package:path/path.dart' as p;
 
-          const String API_URL = "https://hplinfra.com/erp/api/field_app_api.php";
+          const String BASE_URL = "https://hplinfra.com/erp/api";
 
-          void main() async {
+          void main() {
             WidgetsFlutterBinding.ensureInitialized();
-            runApp(const MaterialApp(
-              debugShowCheckedModeBanner: false,
-              home: HplNativeHome(),
-            ));
+            runApp(const MaterialApp(debugShowCheckedModeBanner: false, home: AppRoot()));
           }
 
-          class HplNativeHome extends StatefulWidget {
-            const HplNativeHome({super.key});
+          class AppRoot extends StatefulWidget {
+            const AppRoot({super.key});
             @override
-            State<HplNativeHome> createState() => _HplNativeHomeState();
+            State<AppRoot> createState() => _AppRootState();
           }
 
-          class _HplNativeHomeState extends State<HplNativeHome> {
-            int currentTab = 0;
-            bool isDutyActive = false;
-            Position? currentGps;
-            int offlinePoints = 0;
-            List<dynamic> tasks = [];
-            Database? localDb;
+          class _AppRootState extends State<AppRoot> {
+            bool isLoggedIn = false;
+            int userId = 1;
+            String userName = "Field Engineer";
 
             @override
             void initState() {
               super.initState();
-              _initDatabaseAndGps();
-              _loadTasks();
+              _checkAuth();
             }
 
-            void _initDatabaseAndGps() async {
-              localDb = await openDatabase(
-                p.join(await getDatabasesPath(), 'hpl_offline_app.db'),
-                version: 1,
-                onCreate: (db, v) async {
-                  await db.execute('CREATE TABLE routes (id INTEGER PRIMARY KEY, lat TEXT, lng TEXT, log_time TEXT, synced INTEGER)');
-                },
-              );
-
-              await Geolocator.requestPermission();
-              Timer.periodic(const Duration(minutes: 2), (t) async {
-                try {
-                  Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-                  setState(() => currentGps = pos);
-                  if (localDb != null) {
-                    await localDb!.insert('routes', {
-                      'lat': pos.latitude.toString(),
-                      'lng': pos.longitude.toString(),
-                      'log_time': DateFormat('HH:mm:ss').format(DateTime.now()),
-                      'synced': 0
-                    });
-                    var count = Sqflite.firstIntValue(await localDb!.rawQuery('SELECT COUNT(*) FROM routes WHERE synced=0')) ?? 0;
-                    setState(() => offlinePoints = count);
-                  }
-                  _autoSyncOffline();
-                } catch (_) {}
+            void _checkAuth() async {
+              SharedPreferences p = await SharedPreferences.getInstance();
+              setState(() {
+                isLoggedIn = p.getBool('logged_in') ?? false;
+                userId = p.getInt('user_id') ?? 1;
+                userName = p.getString('user_name') ?? "Field Engineer";
               });
             }
 
-            void _autoSyncOffline() async {
-              if (localDb == null) return;
-              var unsynced = await localDb!.query('routes', where: 'synced=0', limit: 30);
-              if (unsynced.isEmpty) return;
+            @override
+            Widget build(BuildContext context) {
+              return isLoggedIn 
+                ? MainDashboard(userId: userId, userName: userName, onLogout: () {
+                    setState(() => isLoggedIn = false);
+                  })
+                : LoginScreen(onLoginSuccess: (id, name) {
+                    setState(() {
+                      userId = id;
+                      userName = name;
+                      isLoggedIn = true;
+                    });
+                  });
+            }
+          }
 
+          // 1. LOGIN SCREEN
+          class LoginScreen extends StatefulWidget {
+            final Function(int, String) onLoginSuccess;
+            const LoginScreen({super.key, required this.onLoginSuccess});
+            @override
+            State<LoginScreen> createState() => _LoginScreenState();
+          }
+
+          class _LoginScreenState extends State<LoginScreen> {
+            final emailCtrl = TextEditingController(text: "admin@erp.com");
+            final passCtrl = TextEditingController(text: "admin123");
+            bool loading = false;
+
+            void login() async {
+              setState(() => loading = true);
               try {
                 var res = await http.post(
-                  Uri.parse("$API_URL?action=sync_offline_route"),
-                  headers: {"Content-Type": "application/json"},
-                  body: jsonEncode({"user_id": 1, "route_points": unsynced}),
+                  Uri.parse("$BASE_URL/app_sync.php?action=login"),
+                  body: {'email': emailCtrl.text.trim(), 'password': passCtrl.text},
                 );
-                if (res.statusCode == 200) {
-                  await localDb!.update('routes', {'synced': 1}, where: 'synced=0');
-                  setState(() => offlinePoints = 0);
+                var j = jsonDecode(res.body);
+                if (j['status'] == true) {
+                  SharedPreferences p = await SharedPreferences.getInstance();
+                  await p.setBool('logged_in', true);
+                  await p.setInt('user_id', j['user']['id']);
+                  await p.setString('user_name', j['user']['name']);
+                  widget.onLoginSuccess(j['user']['id'], j['user']['name']);
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(j['message'] ?? "Login Failed!")));
                 }
-              } catch (_) {}
+              } catch (e) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Server error: $e")));
+              }
+              setState(() => loading = false);
             }
 
-            void _loadTasks() async {
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                backgroundColor: const Color(0xFF0F172A),
+                body: Center(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(24),
+                    child: Card(
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.engineering, size: 55, color: Colors.indigo),
+                            const SizedBox(height: 10),
+                            const Text("HPL Field Force", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                            const Text("Engineer Login", style: TextStyle(fontSize: 12, color: Colors.grey)),
+                            const SizedBox(height: 20),
+                            TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: "Email ID", border: OutlineInputBorder())),
+                            const SizedBox(height: 12),
+                            TextField(controller: passCtrl, obscureText: true, decoration: const InputDecoration(labelText: "Password", border: OutlineInputBorder())),
+                            const SizedBox(height: 20),
+                            SizedBox(
+                              width: double.infinity,
+                              height: 48,
+                              child: ElevatedButton(
+                                onPressed: loading ? null : login,
+                                style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+                                child: loading ? const CircularProgressIndicator(color: Colors.white) : const Text("SIGN IN TO WORK"),
+                              ),
+                            )
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }
+          }
+
+          // 2. MAIN DASHBOARD (DUTY, MY TASKS, GP EXECUTION)
+          class MainDashboard extends StatefulWidget {
+            final int userId;
+            final String userName;
+            final VoidCallback onLogout;
+            const MainDashboard({super.key, required this.userId, required this.userName, required this.onLogout});
+            @override
+            State<MainDashboard> createState() => _MainDashboardState();
+          }
+
+          class _MainDashboardState extends State<MainDashboard> {
+            int currentTab = 0;
+            Position? currentGps;
+            bool isPunchedIn = false;
+            List<dynamic> myTasks = [];
+
+            @override
+            void initState() {
+              super.initState();
+              _getGps();
+              _fetchTasks();
+            }
+
+            void _getGps() async {
+              await Geolocator.requestPermission();
+              Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+              setState(() => currentGps = pos);
+            }
+
+            // Punch In with Selfie Camera
+            void _punchInWithSelfie() async {
+              final picker = ImagePicker();
+              final picked = await picker.pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front);
+              if (picked == null) return;
+
+              Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+              var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/field_app_api.php?action=punch_in"));
+              req.fields['user_id'] = widget.userId.toString();
+              req.fields['latitude'] = pos.latitude.toString();
+              req.fields['longitude'] = pos.longitude.toString();
+              req.files.add(await http.MultipartFile.fromPath('selfie', picked.path));
+
+              var res = await req.send();
+              if (res.statusCode == 200) {
+                setState(() => isPunchedIn = true);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Punch-In Done with Selfie & GPS!"), backgroundColor: Colors.green));
+              }
+            }
+
+            void _punchOut() async {
+              Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+              await http.post(Uri.parse("$BASE_URL/field_app_api.php?action=punch_out"), body: {
+                'user_id': widget.userId.toString(),
+                'latitude': pos.latitude.toString(),
+                'longitude': pos.longitude.toString(),
+              });
+              setState(() => isPunchedIn = false);
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Duty Ended (Punch-Out Done)!"), backgroundColor: Colors.blue));
+            }
+
+            void _fetchTasks() async {
               try {
-                var res = await http.get(Uri.parse("$API_URL?action=get_my_tasks&user_id=1"));
-                if (res.statusCode == 200) {
-                  var data = jsonDecode(res.body);
-                  if (data['status'] == true) setState(() => tasks = data['tasks']);
-                }
+                var res = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_my_tasks&user_id=${widget.userId}"));
+                var j = jsonDecode(res.body);
+                if (j['status'] == true) setState(() => myTasks = j['tasks']);
               } catch (_) {}
             }
 
             @override
             Widget build(BuildContext context) {
               return Scaffold(
-                backgroundColor: const Color(0xFFF1F5F9),
+                backgroundColor: const Color(0xFFF8FAFC),
                 appBar: AppBar(
-                  title: const Text("HPL Field Force App", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                  title: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(widget.userName, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                      Text(currentGps != null ? "GPS: ${currentGps!.latitude.toStringAsFixed(4)}, ${currentGps!.longitude.toStringAsFixed(4)}" : "Locking GPS...", style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                    ],
+                  ),
                   backgroundColor: const Color(0xFF0F172A),
                   foregroundColor: Colors.white,
                   actions: [
-                    IconButton(icon: const Icon(Icons.sync), onPressed: _autoSyncOffline)
+                    IconButton(
+                      icon: const Icon(Icons.logout),
+                      onPressed: () async {
+                        SharedPreferences p = await SharedPreferences.getInstance();
+                        await p.clear();
+                        widget.onLogout();
+                      },
+                    )
                   ],
                 ),
-                body: currentTab == 0 ? _buildDutyView() : _buildTaskView(),
+                body: currentTab == 0 ? _buildDutyTab() : _buildTasksTab(),
                 bottomNavigationBar: BottomNavigationBar(
                   currentIndex: currentTab,
                   onTap: (i) => setState(() => currentTab = i),
-                  selectedItemColor: const Color(0xFF2563EB),
+                  selectedItemColor: Colors.indigo,
                   items: const [
-                    BottomNavigationBarItem(icon: Icon(Icons.location_on), label: "Duty & GPS"),
-                    BottomNavigationBarItem(icon: Icon(Icons.assignment), label: "My Tasks"),
+                    BottomNavigationBarItem(icon: Icon(Icons.camera_front), label: "Selfie Attendance"),
+                    BottomNavigationBarItem(icon: Icon(Icons.assignment), label: "My Tasks & Sites"),
                   ],
                 ),
               );
             }
 
-            Widget _buildDutyView() {
-              return ListView(
+            Widget _buildDutyTab() {
+              return Padding(
                 padding: const EdgeInsets.all(16),
-                children: [
-                  Card(
-                    color: offlinePoints > 0 ? Colors.orange.shade50 : Colors.green.shade50,
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Row(
-                        children: [
-                          Icon(offlinePoints > 0 ? Icons.cloud_off : Icons.cloud_done, color: offlinePoints > 0 ? Colors.orange : Colors.green),
-                          const SizedBox(width: 10),
-                          Expanded(child: Text(offlinePoints > 0 ? "$offlinePoints Route Points saved in Offline SQLite" : "GPS Satellite Active & Synced", style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12))),
-                        ],
+                child: Column(
+                  children: [
+                    Card(
+                      elevation: 2,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          children: [
+                            Text(isPunchedIn ? "DUTY ACTIVE (ON SITE)" : "DUTY NOT STARTED", style: TextStyle(fontWeight: FontWeight.bold, color: isPunchedIn ? Colors.green : Colors.red)),
+                            const SizedBox(height: 12),
+                            SizedBox(
+                              width: double.infinity,
+                              height: 52,
+                              child: ElevatedButton.icon(
+                                onPressed: isPunchedIn ? _punchOut : _punchInWithSelfie,
+                                icon: Icon(isPunchedIn ? Icons.stop_circle : Icons.camera_alt),
+                                label: Text(isPunchedIn ? "PUNCH OUT (END DUTY)" : "PUNCH IN (TAKE SELFIE)"),
+                                style: ElevatedButton.styleFrom(backgroundColor: isPunchedIn ? Colors.red : Colors.green, foregroundColor: Colors.white),
+                              ),
+                            )
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 12),
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text("LIVE HARDWARE GPS (NO INTERNET NEEDED)", style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey)),
-                          const SizedBox(height: 6),
-                          Text(currentGps != null ? "${currentGps!.latitude.toStringAsFixed(6)}, ${currentGps!.longitude.toStringAsFixed(6)}" : "Locking Satellite Coordinates...", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      setState(() => isDutyActive = !isDutyActive);
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(isDutyActive ? "Duty Started! Start Point Locked." : "Duty Ended! End Point Locked.")));
-                    },
-                    icon: Icon(isDutyActive ? Icons.stop : Icons.play_arrow),
-                    label: Text(isDutyActive ? "PUNCH OUT (End Day)" : "PUNCH IN (Start Day)"),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: isDutyActive ? Colors.red : Colors.green,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
-                    ),
-                  ),
-                ],
+                  ],
+                ),
               );
             }
 
-            Widget _buildTaskView() {
-              if (tasks.isEmpty) return const Center(child: Text("No tasks assigned by MIS coordinator."));
+            Widget _buildTasksTab() {
+              if (myTasks.isEmpty) {
+                return const Center(child: Text("No tasks assigned by MIS coordinator yet."));
+              }
               return ListView.builder(
-                padding: const EdgeInsets.all(14),
-                itemCount: tasks.length,
+                padding: const EdgeInsets.all(12),
+                itemCount: myTasks.length,
                 itemBuilder: (ctx, i) {
-                  var t = tasks[i];
+                  var t = myTasks[i];
                   return Card(
+                    elevation: 2,
+                    margin: const EdgeInsets.only(bottom: 10),
                     child: ListTile(
                       title: Text(t['gp_name'] ?? 'Site', style: const TextStyle(fontWeight: FontWeight.bold)),
-                      subtitle: Text("${t['block_name']} • Due: ${t['target_date']}"),
-                      trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                      subtitle: Text("${t['block_name']} (${t['gp_code']}) • Due: ${t['target_date']}"),
+                      trailing: ElevatedButton(
+                        style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+                        onPressed: () {
+                          Navigator.push(context, MaterialPageRoute(builder: (c) => SiteFormScreen(gpId: t['gp_id'], gpName: t['gp_name'], userName: widget.userName)));
+                        },
+                        child: const Text("Enter Data", style: TextStyle(fontSize: 12)),
+                      ),
                     ),
                   );
                 },
               );
             }
           }
+
+          // 3. COMPLETE SITE DATA & PHOTO SUBMISSION SCREEN
+          class SiteFormScreen extends StatefulWidget {
+            final int gpId;
+            final String gpName;
+            final String userName;
+            const SiteFormScreen({super.key, required this.gpId, required this.gpName, required this.userName});
+            @override
+            State<SiteFormScreen> createState() => _SiteFormScreenState();
+          }
+
+          class _SiteFormScreenState extends State<SiteFormScreen> {
+            final rackCtrl = TextEditingController();
+            final routerCtrl = TextEditingController();
+            final batteryCtrl = TextEditingController();
+            final solarCtrl = TextEditingController();
+            final wccCtrl = TextEditingController(text: "Signed");
+            File? rackPhoto;
+            File? routerPhoto;
+            File? wccPhoto;
+            bool saving = false;
+
+            Future<File?> _takePhoto() async {
+              final picker = ImagePicker();
+              final picked = await picker.pickImage(source: ImageSource.camera, imageQuality: 82);
+              return picked != null ? File(picked.path) : null;
+            }
+
+            void _submitData() async {
+              setState(() => saving = true);
+              Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+              var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/app_sync.php?action=submit_gp_dpr"));
+              req.fields['gp_id'] = widget.gpId.toString();
+              req.fields['user_name'] = widget.userName;
+              req.fields['latitude'] = pos.latitude.toString();
+              req.fields['longitude'] = pos.longitude.toString();
+              req.fields['rack_sn'] = rackCtrl.text;
+              req.fields['router_chassis_no'] = routerCtrl.text;
+              req.fields['battery_sn'] = batteryCtrl.text;
+              req.fields['solar_panel_1'] = solarCtrl.text;
+              req.fields['wcc_status'] = wccCtrl.text;
+
+              if (rackPhoto != null) req.files.add(await http.MultipartFile.fromPath('photo_rack', rackPhoto!.path));
+              if (routerPhoto != null) req.files.add(await http.MultipartFile.fromPath('photo_router', routerPhoto!.path));
+              if (wccPhoto != null) req.files.add(await http.MultipartFile.fromPath('photo_wcc', wccPhoto!.path));
+
+              try {
+                var res = await req.send();
+                if (res.statusCode == 200) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Site Data & Photos uploaded to Master DPR!"), backgroundColor: Colors.green));
+                  Navigator.pop(context);
+                }
+              } catch (_) {}
+              setState(() => saving = false);
+            }
+
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: Text("GP: ${widget.gpName}"), backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+                body: saving 
+                  ? const Center(child: CircularProgressIndicator())
+                  : ListView(
+                      padding: const EdgeInsets.all(16),
+                      children: [
+                        const Text("1. Equipment Serial Numbers", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        const SizedBox(height: 10),
+                        TextField(controller: rackCtrl, decoration: const InputDecoration(labelText: "Rack Serial Number", border: OutlineInputBorder())),
+                        const SizedBox(height: 10),
+                        TextField(controller: routerCtrl, decoration: const InputDecoration(labelText: "Router Chassis Number", border: OutlineInputBorder())),
+                        const SizedBox(height: 10),
+                        TextField(controller: batteryCtrl, decoration: const InputDecoration(labelText: "Battery Serial Number", border: OutlineInputBorder())),
+                        const SizedBox(height: 10),
+                        TextField(controller: solarCtrl, decoration: const InputDecoration(labelText: "Solar Panel Serial Number", border: OutlineInputBorder())),
+                        const SizedBox(height: 20),
+
+                        const Text("2. Take Site Photos (Camera)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                        const SizedBox(height: 10),
+                        ListTile(
+                          leading: Icon(rackPhoto != null ? Icons.check_circle : Icons.camera_alt, color: rackPhoto != null ? Colors.green : Colors.grey),
+                          title: const Text("Rack & EMS Photo"),
+                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => rackPhoto = f); }, child: const Text("Capture")),
+                        ),
+                        ListTile(
+                          leading: Icon(routerPhoto != null ? Icons.check_circle : Icons.camera_alt, color: routerPhoto != null ? Colors.green : Colors.grey),
+                          title: const Text("Router Photo"),
+                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => routerPhoto = f); }, child: const Text("Capture")),
+                        ),
+                        ListTile(
+                          leading: Icon(wccPhoto != null ? Icons.check_circle : Icons.camera_alt, color: wccPhoto != null ? Colors.green : Colors.grey),
+                          title: const Text("Signed WCC Paper Photo"),
+                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => wccPhoto = f); }, child: const Text("Capture")),
+                        ),
+                        const SizedBox(height: 25),
+                        SizedBox(
+                          height: 50,
+                          child: ElevatedButton.icon(
+                            onPressed: _submitData,
+                            icon: const Icon(Icons.cloud_upload),
+                            label: const Text("SUBMIT TO MASTER DPR"),
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
+                          ),
+                        )
+                      ],
+                    ),
+              );
+            }
+          }
           EOF
 
-          # 5. Build Release APK in Cloud
           flutter build apk --release --no-tree-shake-icons
 
       - name: Upload Finished APK
