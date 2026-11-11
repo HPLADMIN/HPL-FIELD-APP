@@ -16,19 +16,17 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Auto-Create Native App & Build APK
+      - name: Build Final HPL Field App APK
         run: |
-          # 1. Fresh Project
           flutter create --org com.hplinfra hpl_field_app
           cd hpl_field_app
 
-          # 2. Add Plugins
+          # Dependencies
           flutter pub add http geolocator image_picker shared_preferences intl
 
-          # 3. Safe Permissions (Same method that was Green at 7:47 AM)
+          # Permissions
           sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n<uses-permission android:name="android.permission.CAMERA"/>' android/app/src/main/AndroidManifest.xml
 
-          # 4. Pure Working Dart Code
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
           import 'dart:convert';
@@ -57,7 +55,6 @@ jobs:
             bool isLoggedIn = false;
             int userId = 1;
             String userName = "Field Engineer";
-            String userRole = "Admin";
 
             @override
             void initState() {
@@ -71,29 +68,28 @@ jobs:
                 isLoggedIn = p.getBool('logged_in') ?? false;
                 userId = p.getInt('user_id') ?? 1;
                 userName = p.getString('user_name') ?? "Field Engineer";
-                userRole = p.getString('user_role') ?? "Admin";
               });
             }
 
             @override
             Widget build(BuildContext context) {
               return isLoggedIn 
-                ? ProDashboard(userId: userId, userName: userName, userRole: userRole, onLogout: () {
+                ? ProDashboard(userId: userId, userName: userName, onLogout: () {
                     setState(() => isLoggedIn = false);
                   })
-                : LoginScreen(onLoginSuccess: (id, name, role) {
+                : LoginScreen(onLoginSuccess: (id, name) {
                     setState(() {
                       userId = id;
                       userName = name;
-                      userRole = role;
                       isLoggedIn = true;
                     });
                   });
             }
           }
 
+          // LOGIN SCREEN
           class LoginScreen extends StatefulWidget {
-            final Function(int, String, String) onLoginSuccess;
+            final Function(int, String) onLoginSuccess;
             const LoginScreen({super.key, required this.onLoginSuccess});
             @override
             State<LoginScreen> createState() => _LoginScreenState();
@@ -117,8 +113,7 @@ jobs:
                   await p.setBool('logged_in', true);
                   await p.setInt('user_id', j['user']['id']);
                   await p.setString('user_name', j['user']['name']);
-                  await p.setString('user_role', j['user']['role'] ?? 'Engineer');
-                  widget.onLoginSuccess(j['user']['id'], j['user']['name'], j['user']['role'] ?? 'Engineer');
+                  widget.onLoginSuccess(j['user']['id'], j['user']['name']);
                 } else {
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(j['message'] ?? "Login Failed!")));
                 }
@@ -144,7 +139,7 @@ jobs:
                             const Icon(Icons.engineering, size: 55, color: Colors.indigo),
                             const SizedBox(height: 10),
                             const Text("HPL Field Force Pro", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-                            const Text("Enterprise Mobile Workspace", style: TextStyle(fontSize: 12, color: Colors.grey)),
+                            const Text("Enterprise Telecom Rollout", style: TextStyle(fontSize: 12, color: Colors.grey)),
                             const SizedBox(height: 20),
                             TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: "Email ID", border: OutlineInputBorder())),
                             const SizedBox(height: 12),
@@ -169,12 +164,12 @@ jobs:
             }
           }
 
+          // PRO DASHBOARD
           class ProDashboard extends StatefulWidget {
             final int userId;
             final String userName;
-            final String userRole;
             final VoidCallback onLogout;
-            const ProDashboard({super.key, required this.userId, required this.userName, required this.userRole, required this.onLogout});
+            const ProDashboard({super.key, required this.userId, required this.userName, required this.onLogout});
             @override
             State<ProDashboard> createState() => _ProDashboardState();
           }
@@ -185,17 +180,25 @@ jobs:
             bool isPunchedIn = false;
             bool isDayCompleted = false;
             List<dynamic> myTasks = [];
-            List<dynamic> teamMembers = [];
-            List<dynamic> chatMessages = [];
-            final chatCtrl = TextEditingController();
+            List<dynamic> filteredTasks = [];
+            String selectedStageFilter = "All";
+            Timer? offlineGpsTimer;
+            int presentDays = 0, absentDays = 0, leavesCount = 0;
 
             @override
             void initState() {
               super.initState();
               _getGps();
-              _checkAttendanceState();
+              _checkPersistentAttendance();
               _fetchTasks();
-              _fetchTeamAndChat();
+              _fetchRealAttendance();
+              _startOfflineGpsBreadcrumbs();
+            }
+
+            @override
+            void dispose() {
+              offlineGpsTimer?.cancel();
+              super.dispose();
             }
 
             void _getGps() async {
@@ -204,13 +207,11 @@ jobs:
               setState(() => currentGps = pos);
             }
 
-            // PERSISTENT ATTENDANCE CHECK (No repeat punch-in on login)
-            void _checkAttendanceState() async {
+            // 1. PERSISTENT ATTENDANCE STATE (Stays 'DUTY ACTIVE' on Re-login)
+            void _checkPersistentAttendance() async {
               SharedPreferences p = await SharedPreferences.getInstance();
               String today = DateFormat('yyyy-MM-dd').format(DateTime.now());
-              String lastDate = p.getString('punch_date') ?? '';
-              
-              if (lastDate == today && (p.getBool('punched_in') ?? false)) {
+              if (p.getString('punch_date') == today && (p.getBool('punched_in') ?? false)) {
                 setState(() => isPunchedIn = true);
               }
 
@@ -226,6 +227,32 @@ jobs:
                   await p.setString('punch_date', today);
                 }
               } catch (_) {}
+            }
+
+            // 2. OFFLINE BREADCRUMB GPS LOGGER (Logs every 5 min locally & auto-syncs)
+            void _startOfflineGpsBreadcrumbs() {
+              offlineGpsTimer = Timer.periodic(const Duration(minutes: 5), (t) async {
+                try {
+                  Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+                  SharedPreferences p = await SharedPreferences.getInstance();
+                  List<String> route = p.getStringList('gps_route') ?? [];
+                  route.add(jsonEncode({'lat': pos.latitude, 'lng': pos.longitude, 'time': DateFormat('HH:mm:ss').format(DateTime.now())}));
+                  await p.setStringList('gps_route', route);
+
+                  // Auto sync if network present
+                  if (route.length >= 3) {
+                    var pts = route.map((e) => jsonDecode(e)).toList();
+                    var res = await http.post(
+                      Uri.parse("$BASE_URL/field_app_api.php?action=sync_offline_route"),
+                      headers: {"Content-Type": "application/json"},
+                      body: jsonEncode({'user_id': widget.userId, 'route_points': pts}),
+                    );
+                    if (res.statusCode == 200) {
+                      await p.remove('gps_route');
+                    }
+                  }
+                } catch (_) {}
+              });
             }
 
             void _punchInWithSelfie() async {
@@ -244,11 +271,10 @@ jobs:
               var res = await req.send();
               if (res.statusCode == 200) {
                 SharedPreferences p = await SharedPreferences.getInstance();
-                String today = DateFormat('yyyy-MM-dd').format(DateTime.now());
                 await p.setBool('punched_in', true);
-                await p.setString('punch_date', today);
+                await p.setString('punch_date', DateFormat('yyyy-MM-dd').format(DateTime.now()));
                 setState(() => isPunchedIn = true);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Punch-In Done! Start Point Saved."), backgroundColor: Colors.green));
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Duty Active! Selfie stamped with GPS Lat/Long."), backgroundColor: Colors.green));
               }
             }
 
@@ -272,32 +298,38 @@ jobs:
               try {
                 var res = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_my_tasks&user_id=${widget.userId}"));
                 var j = jsonDecode(res.body);
-                if (j['status'] == true) setState(() => myTasks = j['tasks']);
+                if (j['status'] == true) {
+                  setState(() {
+                    myTasks = j['tasks'];
+                    _filterTasks("All");
+                  });
+                }
               } catch (_) {}
             }
 
-            void _fetchTeamAndChat() async {
-              try {
-                var resTeam = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_team_members"));
-                var jTeam = jsonDecode(resTeam.body);
-                if (jTeam['status'] == true) setState(() => teamMembers = jTeam['team']);
-
-                var resChat = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_chat_messages"));
-                var jChat = jsonDecode(resChat.body);
-                if (jChat['status'] == true) setState(() => chatMessages = jChat['messages']);
-              } catch (_) {}
-            }
-
-            void _sendChat() async {
-              if (chatCtrl.text.trim().isEmpty) return;
-              var txt = chatCtrl.text.trim();
-              chatCtrl.clear();
-              await http.post(Uri.parse("$BASE_URL/field_app_api.php?action=send_chat_message"), body: {
-                'sender_id': widget.userId.toString(),
-                'sender_name': widget.userName,
-                'message': txt,
+            void _filterTasks(String stage) {
+              setState(() {
+                selectedStageFilter = stage;
+                if (stage == "All") {
+                  filteredTasks = myTasks;
+                } else {
+                  filteredTasks = myTasks.where((t) => (t['task_type'] ?? '').toString().contains(stage)).toList();
+                }
               });
-              _fetchTeamAndChat();
+            }
+
+            void _fetchRealAttendance() async {
+              try {
+                var res = await http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_monthly_attendance&user_id=${widget.userId}"));
+                var j = jsonDecode(res.body);
+                if (j['status'] == true) {
+                  setState(() {
+                    presentDays = j['present'];
+                    absentDays = j['absent'];
+                    leavesCount = j['leaves'];
+                  });
+                }
+              } catch (_) {}
             }
 
             @override
@@ -330,7 +362,6 @@ jobs:
                   children: [
                     _buildDutyTab(),
                     _buildTasksTab(),
-                    _buildChatTab(),
                     _buildCalendarTab(),
                   ],
                 ),
@@ -338,12 +369,9 @@ jobs:
                   currentIndex: currentTab,
                   onTap: (i) => setState(() => currentTab = i),
                   selectedItemColor: Colors.indigo,
-                  unselectedItemColor: Colors.grey,
-                  type: BottomNavigationBarType.fixed,
                   items: const [
                     BottomNavigationBarItem(icon: Icon(Icons.camera_front), label: "Selfie Duty"),
                     BottomNavigationBarItem(icon: Icon(Icons.assignment), label: "My Tasks"),
-                    BottomNavigationBarItem(icon: Icon(Icons.chat), label: "Team Chat"),
                     BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: "Attendance"),
                   ],
                 ),
@@ -378,7 +406,9 @@ jobs:
                                 label: Text(isPunchedIn ? "PUNCH OUT (END DUTY)" : "PUNCH IN (TAKE SELFIE)"),
                                 style: ElevatedButton.styleFrom(backgroundColor: isPunchedIn ? Colors.red : Colors.green, foregroundColor: Colors.white),
                               ),
-                            )
+                            ),
+                          const SizedBox(height: 8),
+                          const Text("Selfie will be watermarked with GPS Lat/Long & Timestamp", style: TextStyle(fontSize: 10, color: Colors.grey)),
                         ],
                       ),
                     ),
@@ -388,141 +418,80 @@ jobs:
             }
 
             Widget _buildTasksTab() {
-              return ListView(
-                padding: const EdgeInsets.all(12),
-                children: [
-                  if (widget.userRole.toLowerCase().contains('admin') || widget.userRole.toLowerCase().contains('mis'))
-                    Card(
-                      color: Colors.indigo.shade50,
-                      child: ListTile(
-                        leading: const Icon(Icons.add_task, color: Colors.indigo),
-                        title: const Text("Assign GP Task to Team", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                        subtitle: const Text("Assign site to any engineer directly from phone", style: TextStyle(fontSize: 11)),
-                        onTap: () {
-                          _showAssignTaskModal();
-                        },
-                      ),
-                    ),
-                  const SizedBox(height: 8),
-                  if (myTasks.isEmpty)
-                    const Padding(padding: EdgeInsets.all(30), child: Center(child: Text("No tasks assigned yet.")))
-                  else
-                    ...myTasks.map((t) => Card(
-                          elevation: 2,
-                          margin: const EdgeInsets.only(bottom: 10),
-                          child: ListTile(
-                            title: Text(t['gp_name'] ?? 'Site', style: const TextStyle(fontWeight: FontWeight.bold)),
-                            subtitle: Text("${t['block_name']} (${t['gp_code']}) • Target: ${t['target_date']}"),
-                            trailing: ElevatedButton(
-                              style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white),
-                              onPressed: () {
-                                Navigator.push(context, MaterialPageRoute(builder: (c) => SiteFormScreen(
-                                  gpId: int.tryParse(t['gp_id']?.toString() ?? '0') ?? 0, 
-                                  gpName: t['gp_name']?.toString() ?? 'Site', 
-                                  userName: widget.userName
-                                )));
-                              },
-                              child: const Text("Enter Data", style: TextStyle(fontSize: 12)),
-                            ),
-                          ),
-                        )),
-                ],
-              );
-            }
-
-            void _showAssignTaskModal() {
-              int selectedEng = teamMembers.isNotEmpty ? (int.tryParse(teamMembers[0]['id'].toString()) ?? 1) : 1;
-              final gpCodeCtrl = TextEditingController();
-              showModalBottomSheet(
-                context: context,
-                isScrollControlled: true,
-                builder: (ctx) => Padding(
-                  padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom, left: 16, right: 16, top: 16),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text("Assign Site Task to Engineer", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                      const SizedBox(height: 12),
-                      TextField(controller: gpCodeCtrl, decoration: const InputDecoration(labelText: "GP Code (e.g. 80093)", border: OutlineInputBorder())),
-                      const SizedBox(height: 10),
-                      DropdownButtonFormField<int>(
-                        value: selectedEng,
-                        decoration: const InputDecoration(labelText: "Assign To Engineer", border: OutlineInputBorder()),
-                        items: teamMembers.map((m) {
-                          return DropdownMenuItem<int>(
-                            value: int.tryParse(m['id'].toString()) ?? 1,
-                            child: Text(m['name']?.toString() ?? 'Engineer'),
-                          );
-                        }).toList(),
-                        onChanged: (v) {
-                          if (v != null) selectedEng = v;
-                        },
-                      ),
-                      const SizedBox(height: 15),
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white, minimumSize: const Size.fromHeight(45)),
-                        onPressed: () async {
-                          Navigator.pop(ctx);
-                          await http.post(Uri.parse("$BASE_URL/field_app_api.php?action=assign_task_from_app"), body: {
-                            'gp_id': gpCodeCtrl.text,
-                            'assigned_to': selectedEng.toString(),
-                            'assigned_by': widget.userId.toString(),
-                            'task_type': 'I&C Installation',
-                            'target_date': DateFormat('yyyy-MM-dd').format(DateTime.now()),
-                          });
-                          _fetchTasks();
-                        },
-                        child: const Text("Confirm & Send Task"),
-                      ),
-                      const SizedBox(height: 20),
-                    ],
-                  ),
-                ),
-              );
-            }
-
-            Widget _buildChatTab() {
               return Column(
                 children: [
-                  Expanded(
-                    child: ListView.builder(
-                      padding: const EdgeInsets.all(12),
-                      itemCount: chatMessages.length,
-                      itemBuilder: (ctx, i) {
-                        var m = chatMessages[i];
-                        bool isMe = m['sender_id'].toString() == widget.userId.toString();
-                        return Align(
-                          alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                          child: Container(
-                            margin: const EdgeInsets.only(bottom: 8),
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: isMe ? Colors.indigo : Colors.white,
-                              borderRadius: BorderRadius.circular(10),
-                              boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 2)],
-                            ),
-                            child: Column(
-                              crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                              children: [
-                                Text(m['sender_name'] ?? 'User', style: TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: isMe ? Colors.white70 : Colors.indigo)),
-                                Text(m['message'] ?? '', style: TextStyle(color: isMe ? Colors.white : Colors.black87, fontSize: 13)),
-                              ],
-                            ),
+                  // Stage Filter Horizontal Bar
+                  Container(
+                    height: 50,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    color: Colors.white,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      children: ["All", "Stage 1", "Stage 2", "Stage 3", "Stage 4", "Stage 5", "Stage 6"].map((stg) {
+                        bool sel = selectedStageFilter == stg;
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: ChoiceChip(
+                            label: Text(stg, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: sel ? Colors.white : Colors.black87)),
+                            selected: sel,
+                            selectedColor: Colors.indigo,
+                            onSelected: (b) => _filterTasks(stg),
                           ),
                         );
-                      },
+                      }).toList(),
                     ),
                   ),
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    color: Colors.white,
-                    child: Row(
-                      children: [
-                        Expanded(child: TextField(controller: chatCtrl, decoration: const InputDecoration(hintText: "Type update / site issue...", border: InputBorder.none))),
-                        IconButton(icon: const Icon(Icons.send, color: Colors.indigo), onPressed: _sendChat),
-                      ],
-                    ),
-                  )
+                  Expanded(
+                    child: filteredTasks.isEmpty
+                      ? const Center(child: Text("No tasks assigned under this stage."))
+                      : ListView.builder(
+                          padding: const EdgeInsets.all(12),
+                          itemCount: filteredTasks.length,
+                          itemBuilder: (ctx, i) {
+                            var t = filteredTasks[i];
+                            return Card(
+                              elevation: 2,
+                              margin: const EdgeInsets.only(bottom: 12),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              child: Padding(
+                                padding: const EdgeInsets.all(14),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    // Task Stage Badge
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(color: Colors.indigo.shade50, borderRadius: BorderRadius.circular(6), border: Border.all(color: Colors.indigo.shade200)),
+                                      child: Text(t['task_type'] ?? 'Execution Stage', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.indigo)),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(t['gp_name'] ?? 'GP Site', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                    Text("${t['district_name']} • ${t['block_name']} (${t['gp_code']}) • Target: ${t['target_date']}", style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                                    const SizedBox(height: 10),
+                                    SizedBox(
+                                      width: double.infinity,
+                                      child: ElevatedButton.icon(
+                                        style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+                                        onPressed: () {
+                                          Navigator.push(context, MaterialPageRoute(builder: (c) => StageExecutionScreen(
+                                            taskId: int.tryParse(t['task_id']?.toString() ?? '0') ?? 0,
+                                            gpId: int.tryParse(t['gp_id']?.toString() ?? '0') ?? 0,
+                                            gpName: t['gp_name'] ?? 'Site',
+                                            taskStage: t['task_type'] ?? 'Stage 1',
+                                            userName: widget.userName,
+                                          )));
+                                        },
+                                        icon: const Icon(Icons.camera_alt, size: 16),
+                                        label: const Text("Open Stage Execution Form", style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                  ),
                 ],
               );
             }
@@ -537,14 +506,14 @@ jobs:
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Text("Monthly Attendance Summary", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                          const SizedBox(height: 10),
+                          const Text("Real Attendance Summary (This Month)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                          const SizedBox(height: 12),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceAround,
                             children: [
-                              Column(children: [Text("24", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.green)), Text("Present", style: TextStyle(fontSize: 11))]),
-                              Column(children: [Text("0", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.red)), Text("Absent", style: TextStyle(fontSize: 11))]),
-                              Column(children: [Text("2", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.blue)), Text("Leaves", style: TextStyle(fontSize: 11))]),
+                              Column(children: [Text("$presentDays", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.green)), const Text("Present Days", style: TextStyle(fontSize: 11))]),
+                              Column(children: [Text("$absentDays", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.red)), const Text("Absent Days", style: TextStyle(fontSize: 11))]),
+                              Column(children: [Text("$leavesCount", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.blue)), const Text("Approved Leaves", style: TextStyle(fontSize: 11))]),
                             ],
                           )
                         ],
@@ -556,52 +525,60 @@ jobs:
             }
           }
 
-          class SiteFormScreen extends StatefulWidget {
+          // DYNAMIC STAGE-SPECIFIC EXECUTION SCREEN (Only shows fields for that specific stage!)
+          class StageExecutionScreen extends StatefulWidget {
+            final int taskId;
             final int gpId;
             final String gpName;
+            final String taskStage;
             final String userName;
-            const SiteFormScreen({super.key, required this.gpId, required this.gpName, required this.userName});
+            const StageExecutionScreen({super.key, required this.taskId, required this.gpId, required this.gpName, required this.taskStage, required this.userName});
             @override
-            State<SiteFormScreen> createState() => _SiteFormScreenState();
+            State<StageExecutionScreen> createState() => _StageExecutionScreenState();
           }
 
-          class _SiteFormScreenState extends State<SiteFormScreen> {
-            final rackCtrl = TextEditingController();
-            final routerCtrl = TextEditingController();
-            final batteryCtrl = TextEditingController();
-            final solarCtrl = TextEditingController();
-            File? rackPhoto;
-            File? routerPhoto;
-            File? wccPhoto;
+          class _StageExecutionScreenState extends State<StageExecutionScreen> {
+            final Map<String, TextEditingController> ctrls = {};
+            final Map<String, File?> photos = {};
+            final remarksCtrl = TextEditingController();
             bool saving = false;
 
-            Future<File?> _takePhoto() async {
-              final picker = ImagePicker();
-              final picked = await picker.pickImage(source: ImageSource.camera, imageQuality: 82);
-              return picked != null ? File(picked.path) : null;
+            TextEditingController _getCtrl(String key) {
+              ctrls.putIfAbsent(key, () => TextEditingController());
+              return ctrls[key]!;
             }
 
-            void _submitData() async {
+            Future<void> _capture(String tag) async {
+              final picker = ImagePicker();
+              final picked = await picker.pickImage(source: ImageSource.camera, imageQuality: 82);
+              if (picked != null) {
+                setState(() => photos[tag] = File(picked.path));
+              }
+            }
+
+            void _submit() async {
               setState(() => saving = true);
               Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-              var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/app_sync.php?action=submit_gp_dpr"));
+              var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/app_sync.php?action=submit_stage_execution"));
+              req.fields['task_id'] = widget.taskId.toString();
               req.fields['gp_id'] = widget.gpId.toString();
+              req.fields['stage_type'] = widget.taskStage;
               req.fields['user_name'] = widget.userName;
               req.fields['latitude'] = pos.latitude.toString();
               req.fields['longitude'] = pos.longitude.toString();
-              req.fields['rack_sn'] = rackCtrl.text;
-              req.fields['router_chassis_no'] = routerCtrl.text;
-              req.fields['battery_sn'] = batteryCtrl.text;
-              req.fields['solar_panel_1'] = solarCtrl.text;
+              req.fields['remarks'] = remarksCtrl.text;
 
-              if (rackPhoto != null) req.files.add(await http.MultipartFile.fromPath('photo_rack', rackPhoto!.path));
-              if (routerPhoto != null) req.files.add(await http.MultipartFile.fromPath('photo_router', routerPhoto!.path));
-              if (wccPhoto != null) req.files.add(await http.MultipartFile.fromPath('photo_wcc', wccPhoto!.path));
+              ctrls.forEach((k, v) { req.fields[k] = v.text; });
+              for (var entry in photos.entries) {
+                if (entry.value != null) {
+                  req.files.add(await http.MultipartFile.fromPath(entry.key, entry.value!.path));
+                }
+              }
 
               try {
                 var res = await req.send();
                 if (res.statusCode == 200) {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("✓ Site Data & GPS Stamped Photos uploaded!"), backgroundColor: Colors.green));
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("✓ ${widget.taskStage} Evidence Saved with GPS Stamp!"), backgroundColor: Colors.green));
                   Navigator.pop(context);
                 }
               } catch (_) {}
@@ -611,50 +588,107 @@ jobs:
             @override
             Widget build(BuildContext context) {
               return Scaffold(
-                appBar: AppBar(title: Text("GP: ${widget.gpName}"), backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+                appBar: AppBar(title: Text(widget.gpName), backgroundColor: Colors.indigo, foregroundColor: Colors.white),
                 body: saving 
                   ? const Center(child: CircularProgressIndicator())
                   : ListView(
                       padding: const EdgeInsets.all(16),
                       children: [
-                        const Text("1. Serial Numbers", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                        const SizedBox(height: 8),
-                        TextField(controller: rackCtrl, decoration: const InputDecoration(labelText: "Rack Serial Number", border: OutlineInputBorder())),
-                        const SizedBox(height: 8),
-                        TextField(controller: routerCtrl, decoration: const InputDecoration(labelText: "Router Chassis Number", border: OutlineInputBorder())),
-                        const SizedBox(height: 8),
-                        TextField(controller: batteryCtrl, decoration: const InputDecoration(labelText: "Battery Serial Number", border: OutlineInputBorder())),
-                        const SizedBox(height: 8),
-                        TextField(controller: solarCtrl, decoration: const InputDecoration(labelText: "Solar Panel Serial Number", border: OutlineInputBorder())),
-                        const SizedBox(height: 16),
-                        const Text("2. Geo-Tagged Photos (Camera)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                        ListTile(
-                          leading: Icon(rackPhoto != null ? Icons.check_circle : Icons.camera_alt, color: rackPhoto != null ? Colors.green : Colors.grey),
-                          title: const Text("Rack Photo"),
-                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => rackPhoto = f); }, child: const Text("Click")),
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(color: Colors.indigo.shade50, borderRadius: BorderRadius.circular(8)),
+                          child: Text("Executing: ${widget.taskStage}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
                         ),
-                        ListTile(
-                          leading: Icon(routerPhoto != null ? Icons.check_circle : Icons.camera_alt, color: routerPhoto != null ? Colors.green : Colors.grey),
-                          title: const Text("Router Photo"),
-                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => routerPhoto = f); }, child: const Text("Click")),
-                        ),
-                        ListTile(
-                          leading: Icon(wccPhoto != null ? Icons.check_circle : Icons.camera_alt, color: wccPhoto != null ? Colors.green : Colors.grey),
-                          title: const Text("WCC Photo"),
-                          trailing: ElevatedButton(onPressed: () async { var f = await _takePhoto(); setState(() => wccPhoto = f); }, child: const Text("Click")),
-                        ),
+                        const SizedBox(height: 14),
+
+                        // STAGE 1: UNLOADING
+                        if (widget.taskStage.contains('Stage 1') || widget.taskStage.contains('Unloading')) ...[
+                          _photoTile('Unloaded_Material_Site', 'Unloaded Material at Site Photo *'),
+                          _photoTile('Delivery_Challan_Copy', 'Delivery Challan / Transporter Bilty Photo *'),
+                        ]
+                        // STAGE 2: RACK & ACTIVE I&C
+                        else if (widget.taskStage.contains('Stage 2') || widget.taskStage.contains('Rack')) ...[
+                          _inputField('router_chassis_no', 'Router Chassis Serial No *'),
+                          _inputField('rack_sn', 'Rack Serial No *'),
+                          _inputField('ems_sn', 'EMS Serial No *'),
+                          _inputField('hups_sn', 'HUPS Serial No *'),
+                          _inputField('battery_sn', 'Battery Bank Serial No *'),
+                          _photoTile('Upper_Rack_Compartment', 'Upper Rack Compartment Photo *'),
+                          _photoTile('Lower_Rack_Compartment', 'Lower Rack Compartment Photo *'),
+                          _photoTile('Band_Rack_Front', 'Band Rack (Closed) Photo *'),
+                          _photoTile('Rack_Grouting_Base', 'Rack Grouting Base Foundation Photo *'),
+                        ]
+                        // STAGE 3: EARTHING
+                        else if (widget.taskStage.contains('Stage 3') || widget.taskStage.contains('Earthing')) ...[
+                          _photoTile('Earth_Electrode_Pit', 'Earthing Pit Photo *'),
+                          _photoTile('Busbar_Termination_Strip', 'Copper Busbar & Strip Termination Photo *'),
+                          _photoTile('Earthing_Meter_Ohm_Reading', 'Earth Resistance Tester (Ohm Reading Photo) *'),
+                        ]
+                        // STAGE 4: SOLAR & CIVIL
+                        else if (widget.taskStage.contains('Stage 4') || widget.taskStage.contains('Solar')) ...[
+                          _inputField('solar_panel_1', 'Solar Panel 1 Serial No *'),
+                          _inputField('solar_panel_2', 'Solar Panel 2 Serial No *'),
+                          _photoTile('Solar_Mounting_Structure', 'Solar Structure on Roof Photo *'),
+                          _photoTile('Civil_Foundation_Pedestal', 'Civil Concrete Pedestal Photo *'),
+                          _photoTile('Solar_Earthing_Lightning', 'Solar Earthing & Lightning Arrester Photo *'),
+                        ]
+                        // STAGE 5: INTEGRATION & SFPS
+                        else if (widget.taskStage.contains('Stage 5') || widget.taskStage.contains('Integration')) ...[
+                          _photoTile('Engineer_Selfie_Enclosure', 'Selfie with Installed Rack *'),
+                          _inputField('sfp_1', 'SFP 1 Electrical Serial No *'),
+                          _inputField('sfp_2', 'SFP 2 Optical (LR/ER) Serial No *'),
+                          _inputField('sfp_3', 'SFP 3 Optical (LR/ER) Serial No *'),
+                          _photoTile('Bypass_Filter_Patching', 'Bypass Filter Patching Photo *'),
+                          _photoTile('Router_LED_Link_Ping', 'Router LED Link & Ping Verification Photo *'),
+                        ]
+                        // STAGE 6: FAT & HANDOVER
+                        else ...[
+                          _photoTile('Joint_Selfie_With_BSNL_Officer', 'Selfie with BSNL / IE Officer *'),
+                          _photoTile('Smoke_Detector_Alarm_Test', 'Smoke Alarm Test Photo *'),
+                          _photoTile('Water_Ingress_Sensor_Test', 'Water Ingress Sensor Photo *'),
+                          _photoTile('Door_Intrusion_Switch_Test', 'Door Intrusion Switch Alarm Photo *'),
+                          _photoTile('Noise_Meter_Ambient_Reading', 'Noise Meter Reading Photo *'),
+                          _inputField('fat_cert_no', 'FAT Certificate Number *'),
+                          _photoTile('Signed_WCC_Handover_Document', 'Signed WCC / Handover Document Photo *'),
+                        ],
+
+                        const SizedBox(height: 12),
+                        TextField(controller: remarksCtrl, decoration: const InputDecoration(labelText: "Task Remarks / Site Note", border: OutlineInputBorder())),
                         const SizedBox(height: 20),
                         SizedBox(
-                          height: 48,
+                          height: 50,
                           child: ElevatedButton.icon(
-                            onPressed: _submitData,
+                            onPressed: _submit,
                             icon: const Icon(Icons.cloud_upload),
-                            label: const Text("SUBMIT TO MASTER DPR"),
+                            label: const Text("SUBMIT STAGE WITH GPS STAMP", style: TextStyle(fontWeight: FontWeight.bold)),
                             style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
                           ),
                         )
                       ],
                     ),
+              );
+            }
+
+            Widget _inputField(String key, String label) {
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: TextField(controller: _getCtrl(key), decoration: InputDecoration(labelText: label, border: const OutlineInputBorder())),
+              );
+            }
+
+            Widget _photoTile(String tag, String title) {
+              bool done = photos[tag] != null;
+              return Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  leading: Icon(done ? Icons.check_circle : Icons.camera_alt, color: done ? Colors.green : Colors.grey),
+                  title: Text(title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                  trailing: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: done ? Colors.green : Colors.indigo, foregroundColor: Colors.white),
+                    onPressed: () => _capture(tag),
+                    child: Text(done ? "Retake" : "Capture", style: const TextStyle(fontSize: 11)),
+                  ),
+                ),
               );
             }
           }
