@@ -7,7 +7,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
@@ -23,10 +23,10 @@ jobs:
 
           flutter pub add http geolocator image_picker shared_preferences intl
 
-          # ===== FIX: image_picker lint crash =====
+          # ===== ONLY FIX ADDED (image_picker lint crash) =====
           sed -i '/android {/a\    lint {\n        checkReleaseBuilds false\n        abortOnError false\n    }' android/app/build.gradle
 
-          # Android Permissions
+          # Android Permissions with Background Tracking
           sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n<uses-permission android:name="android.permission.WAKE_LOCK"/>\n<uses-permission android:name="android.permission.CAMERA"/>' android/app/src/main/AndroidManifest.xml
 
           cat << 'EOF' > lib/main.dart
@@ -206,9 +206,7 @@ jobs:
 
             void _getGps() async {
               await Geolocator.requestPermission();
-              Position pos = await Geolocator.getCurrentPosition(
-                locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-              );
+              Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
               setState(() => currentGps = pos);
             }
 
@@ -236,9 +234,7 @@ jobs:
             void _startOfflineGpsBreadcrumbs() {
               offlineGpsTimer = Timer.periodic(const Duration(minutes: 5), (t) async {
                 try {
-                  Position pos = await Geolocator.getCurrentPosition(
-                    locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-                  );
+                  Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
                   SharedPreferences p = await SharedPreferences.getInstance();
                   List<String> route = p.getStringList('gps_route') ?? [];
                   route.add(jsonEncode({'lat': pos.latitude, 'lng': pos.longitude, 'time': DateFormat('HH:mm:ss').format(DateTime.now())}));
@@ -264,9 +260,7 @@ jobs:
               final picked = await picker.pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front);
               if (picked == null) return;
 
-              Position pos = await Geolocator.getCurrentPosition(
-                locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-              );
+              Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
               var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/field_app_api.php?action=punch_in"));
               req.fields['user_id'] = widget.userId.toString();
               req.fields['user_name'] = widget.userName;
@@ -285,9 +279,7 @@ jobs:
             }
 
             void _punchOut() async {
-              Position pos = await Geolocator.getCurrentPosition(
-                locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-              );
+              Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
               await http.post(Uri.parse("$BASE_URL/field_app_api.php?action=punch_out"), body: {
                 'user_id': widget.userId.toString(),
                 'latitude': pos.latitude.toString(),
@@ -634,9 +626,7 @@ jobs:
 
             void _submit() async {
               setState(() => saving = true);
-              Position pos = await Geolocator.getCurrentPosition(
-                locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
-              );
+              Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
               var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/app_sync.php?action=submit_stage_execution"));
               req.fields['task_id'] = widget.taskId.toString();
               req.fields['gp_id'] = widget.gpId.toString();
@@ -684,7 +674,7 @@ jobs:
                           _photoTile('Delivery_Challan_Copy', '1. Delivery Challan / Bilty Copy Photo *'),
                           _photoTile('Unloaded_Material_Site', '2. Unloaded Material at Site Photo *'),
                         ]
-                        // STAGE 2: RACK & ACTIVE I&C
+                        // STAGE 2: RACK & ACTIVE I&C (ALL 10 SERIAL NUMBERS + PHOTOS)
                         else if (widget.taskStage.contains('Stage 2') || widget.taskStage.contains('Rack')) ...[
                           _snWithPhoto('router_chassis_no', 'photo_router_chassis', '1. Router Chassis Number *'),
                           _snWithPhoto('router_barcode_sn', 'photo_router_barcode', '2. Router Barcode SN *'),
