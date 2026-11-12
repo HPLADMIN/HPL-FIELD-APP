@@ -1343,4 +1343,144 @@ jobs:
                           _photoTile('Copper_Busbar_Strip', '2. Copper Busbar Strip Photo *'),
                           _photoTile('Earthing_Strip_Termination', '3. Connected Earthing Strip Termination Photo *'),
                         ]
-                      
+                        // STAGE 4: SOLAR INSTALLATION
+                        else if (widget.taskStage.contains('Stage 4') || widget.taskStage.contains('Solar')) ...[
+                          _snWithPhoto('solar_panel_1', 'photo_solar_panel_1', '1. Solar Panel 1 Serial Number *'),
+                          _snWithPhoto('solar_panel_2', 'photo_solar_panel_2', '2. Solar Panel 2 Serial Number *'),
+                          _photoTile('Solar_Mounting_Structure', '3. Solar Mounting Structure on Roof Photo *'),
+                          _photoTile('Civil_Concrete_Pedestal', '4. Civil Concrete Pedestal Work Photo *'),
+                          _photoTile('Solar_Earthing_Pit', '5. Dedicated Solar Earthing Pit Photo *'),
+                        ]
+                        // STAGE 5: INTEGRATION & SFPS
+                        else if (widget.taskStage.contains('Stage 5') || widget.taskStage.contains('Integration')) ...[
+                          _photoTile('Engineer_Selfie_Rack', '1. Field Engineer Verification Selfie with Rack *'),
+                          _snWithPhoto('sfp_1', 'photo_sfp_electrical', '2. SFP 1 Electrical (Copper) SN *'),
+                          _snWithPhoto('sfp_2', 'photo_sfp_optical_1', '3. SFP 2 Optical (LR/ER) SN *'),
+                          _snWithPhoto('sfp_3', 'photo_sfp_optical_2', '4. SFP 3 Optical (LR/ER) SN *'),
+                          _photoTile('Bypass_Filter_Patching', '5. Bypass Filter Patching Photo *'),
+                          _photoTile('Optical_Patch_Cord_Dressing', '6. Optical Fiber Patch Cord Dressing Photo *'),
+                          _photoTile('Router_LED_Link_Ping', '7. Router LED Port Link Status & Active Ping Photo *'),
+                        ]
+                        // STAGE 6: FAT / FINAL AT HANDOVER
+                        else ...[
+                          const Text("A. Joint Inspection & Structure Evidence", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                          _photoTile('Joint_Selfie_With_BSNL_Officer', '1. Joint Selfie with BSNL / IE Officer (FT/NE Team) *'),
+                          _photoTile('Khuli_Rack_Upper_Half', '2. Khuli Rack Upper Half Compartment Photo *'),
+                          _photoTile('Khuli_Rack_Lower_Half', '3. Khuli Rack Lower Half Compartment Photo *'),
+                          _photoTile('Band_Rack_Front_Closed', '4. Band Rack Front Profile (Closed) Photo *'),
+                          _photoTile('Foundation_Grouting_Base', '5. Foundation Grouting Base Photo *'),
+                          const Divider(),
+                          const Text("B. Fresh Retakes on FAT Date (GPS Watermark)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                          _photoTile('FAT_Retake_Router_Chassis', '6. Re-take: Router Chassis Plate Photo *'),
+                          _photoTile('FAT_Retake_EMS_SN', '7. Re-take: EMS SN Plate Photo *'),
+                          _photoTile('FAT_Retake_HUPS_SN', '8. Re-take: HUPS SN Plate Photo *'),
+                          _photoTile('FAT_Retake_Inverter_SN', '9. Re-take: Inverter SN Plate Photo *'),
+                          _photoTile('FAT_Retake_Rectifier_1_2', '10. Re-take: Rectifier Modules 1 & 2 Photos *'),
+                          _photoTile('FAT_Retake_Battery_Bank', '11. Re-take: Battery Bank SN Photo *'),
+                          _photoTile('FAT_Retake_Bypass_Filter', '12. Re-take: Bypass Filter SN Photo *'),
+                          _photoTile('FAT_Retake_Rack_SN', '13. Re-take: Rack SN Plate Photo *'),
+                          _photoTile('FAT_Retake_Earthing_Pit', '14. Re-take: Earth Electrode Pit Photo *'),
+                          _photoTile('FAT_Retake_Busbar_Strip', '15. Re-take: Copper Busbar Strip Photo *'),
+                          _photoTile('FAT_Retake_Solar_Panels', '16. Re-take: Solar Panels 1 & 2 Photos (If Solar)'),
+                          _photoTile('FAT_Retake_Solar_Mounting', '17. Re-take: Solar Mounting Structure on Roof (If Solar)'),
+                          _photoTile('FAT_Retake_SFPs_Patching', '18. Re-take: SFPs & Patching Routing Photo *'),
+                          _photoTile('FAT_Retake_Router_LED_Link', '19. Re-take: Router LED Link & Active Ping Photo *'),
+                          const Divider(),
+                          const Text("C. Testing, Sensor Alarms & Official Handover", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                          _photoTile('Earthing_Meter_Ohm_Reading', '20. Earth Resistance Tester (Ohm Reading on Display) *'),
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: TextField(
+                              controller: _getCtrl('earth_resistance_ohm'),
+                              onChanged: (v) => _saveDraftToLocalStorage(),
+                              decoration: const InputDecoration(labelText: "Measured Earth Resistance in Ohms (< 0.5 Ω) *", border: OutlineInputBorder()),
+                            ),
+                          ),
+                          _photoTile('Smoke_Detector_Alarm_Test', '21. Smoke Detector Alarm Test Photo *'),
+                          _photoTile('Water_Ingress_Sensor_Test', '22. Water Ingress / Moisture Sensor Photo *'),
+                          _photoTile('Door_Tamper_Alarm_Test', '23. Rack Door Close / Tamper Alarm Photo *'),
+                          _photoTile('Noise_Meter_Ambient_Reading', '24. Ambient Sound Level / Noise Meter (dB Reading) *'),
+                          _photoTile('Signed_WCC_Handover_Document', '25. Signed WCC / Handover Document Copy Photo *'),
+                        ],
+
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: remarksCtrl,
+                          onChanged: (v) => _saveDraftToLocalStorage(),
+                          decoration: const InputDecoration(labelText: "Task Remarks / Site Note", border: OutlineInputBorder()),
+                        ),
+                        const SizedBox(height: 20),
+                        SizedBox(
+                          height: 50,
+                          child: ElevatedButton.icon(
+                            onPressed: _submit,
+                            icon: const Icon(Icons.cloud_upload),
+                            label: const Text("SUBMIT STAGE (AUTO-OFFLINE SUPPORT)", style: TextStyle(fontWeight: FontWeight.bold)),
+                            style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
+                          ),
+                        )
+                      ],
+                    ),
+              );
+            }
+
+            Widget _snWithPhoto(String snKey, String photoTag, String label) {
+              bool done = photos[photoTag] != null;
+              return Card(
+                margin: const EdgeInsets.only(bottom: 10),
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                      const SizedBox(height: 6),
+                      TextField(
+                        controller: _getCtrl(snKey),
+                        onChanged: (v) => _saveDraftToLocalStorage(),
+                        decoration: const InputDecoration(hintText: "Enter Serial Number", isDense: true, border: OutlineInputBorder()),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(done ? "✓ Watermarked Photo Attached" : "Capture / Upload Photo", style: TextStyle(fontSize: 11, color: done ? Colors.green : Colors.grey)),
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(backgroundColor: done ? Colors.green : Colors.indigo, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
+                            onPressed: () => _selectImageOption(photoTag),
+                            icon: const Icon(Icons.add_a_photo, size: 14),
+                            label: Text(done ? "Change" : "Add Photo", style: const TextStyle(fontSize: 11)),
+                          ),
+                        ],
+                      )
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            Widget _photoTile(String tag, String title) {
+              bool done = photos[tag] != null;
+              return Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: ListTile(
+                  leading: Icon(done ? Icons.check_circle : Icons.camera_alt, color: done ? Colors.green : Colors.grey),
+                  title: Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+                  trailing: ElevatedButton(
+                    style: ElevatedButton.styleFrom(backgroundColor: done ? Colors.green : Colors.indigo, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
+                    onPressed: () => _selectImageOption(tag),
+                    child: Text(done ? "Change" : "Add Photo", style: const TextStyle(fontSize: 11)),
+                  ),
+                ),
+              );
+            }
+          }
+          EOF_DART
+
+          flutter build apk --release --no-tree-shake-icons
+
+      - name: Upload Finished APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HPL-Field-Team-APK
+          path: hpl_field_app/build/app/outputs/flutter-apk/app-release.apk
