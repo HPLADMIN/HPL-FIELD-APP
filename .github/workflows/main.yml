@@ -18,17 +18,14 @@ jobs:
 
       - name: Build HPL Pro Field App APK
         run: |
-          # 1. Fresh Project
           flutter create --org com.hplinfra hpl_field_app
           cd hpl_field_app
 
-          # 2. Add Plugins
           flutter pub add http geolocator image_picker shared_preferences intl
 
-          # 3. Safe Android Permissions
-          sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n<uses-permission android:name="android.permission.CAMERA"/>' android/app/src/main/AndroidManifest.xml
+          # Android Permissions with Background Tracking
+          sed -i '/<application/i <uses-permission android:name="android.permission.INTERNET"/>\n<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>\n<uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>\n<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>\n<uses-permission android:name="android.permission.WAKE_LOCK"/>\n<uses-permission android:name="android.permission.CAMERA"/>' android/app/src/main/AndroidManifest.xml
 
-          # 4. Injected Pure 6-Stage Dart Code
           cat << 'EOF' > lib/main.dart
           import 'dart:async';
           import 'dart:convert';
@@ -89,7 +86,6 @@ jobs:
             }
           }
 
-          // LOGIN SCREEN
           class LoginScreen extends StatefulWidget {
             final Function(int, String) onLoginSuccess;
             const LoginScreen({super.key, required this.onLoginSuccess});
@@ -140,7 +136,7 @@ jobs:
                           children: [
                             const Icon(Icons.engineering, size: 55, color: Colors.indigo),
                             const SizedBox(height: 10),
-                            const Text("HPL Field Force Pro", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                            const Text("HPL Field Team", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
                             const Text("Enterprise Telecom Rollout", style: TextStyle(fontSize: 12, color: Colors.grey)),
                             const SizedBox(height: 20),
                             TextField(controller: emailCtrl, decoration: const InputDecoration(labelText: "Email ID", border: OutlineInputBorder())),
@@ -166,7 +162,6 @@ jobs:
             }
           }
 
-          // MAIN PRO DASHBOARD
           class ProDashboard extends StatefulWidget {
             final int userId;
             final String userName;
@@ -212,7 +207,6 @@ jobs:
               setState(() => currentGps = pos);
             }
 
-            // 1. PERSISTENT ATTENDANCE (No Re-punch on Re-login)
             void _checkPersistentAttendance() async {
               SharedPreferences p = await SharedPreferences.getInstance();
               String today = DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -234,7 +228,6 @@ jobs:
               } catch (_) {}
             }
 
-            // 2. OFFLINE GPS BREADCRUMB LOGGER (Every 5 mins)
             void _startOfflineGpsBreadcrumbs() {
               offlineGpsTimer = Timer.periodic(const Duration(minutes: 5), (t) async {
                 try {
@@ -436,7 +429,7 @@ jobs:
                               ),
                             ),
                           const SizedBox(height: 8),
-                          const Text("All captured photos are permanently stamped with GPS Lat/Long", style: TextStyle(fontSize: 10, color: Colors.grey)),
+                          const Text("All photos are permanently stamped with GPS Lat/Long & Timestamp", style: TextStyle(fontSize: 10, color: Colors.grey)),
                         ],
                       ),
                     ),
@@ -448,7 +441,6 @@ jobs:
             Widget _buildTasksTab() {
               return Column(
                 children: [
-                  // Horizontal Stage Filter Bar
                   Container(
                     height: 50,
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -486,7 +478,6 @@ jobs:
                                 child: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    // Stage Name Badge
                                     Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                       decoration: BoxDecoration(color: Colors.indigo.shade50, borderRadius: BorderRadius.circular(6), border: Border.all(color: Colors.indigo.shade200)),
@@ -561,7 +552,7 @@ jobs:
                     color: Colors.white,
                     child: Row(
                       children: [
-                        Expanded(child: TextField(controller: chatCtrl, decoration: const InputDecoration(hintText: "Type site update / team issue...", border: InputBorder.none))),
+                        Expanded(child: TextField(controller: chatCtrl, decoration: const InputDecoration(hintText: "Type site issue / team update...", border: InputBorder.none))),
                         IconButton(icon: const Icon(Icons.send, color: Colors.indigo), onPressed: _sendChat),
                       ],
                     ),
@@ -599,7 +590,7 @@ jobs:
             }
           }
 
-          // STAGE-SPECIFIC EXECUTION SCREEN (Only shows fields for that specific stage!)
+          // DYNAMIC STAGE-SPECIFIC EXECUTION SCREEN
           class StageExecutionScreen extends StatefulWidget {
             final int taskId;
             final int gpId;
@@ -652,7 +643,7 @@ jobs:
               try {
                 var res = await req.send();
                 if (res.statusCode == 200) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("✓ ${widget.taskStage} Evidence Saved with GPS Stamp!"), backgroundColor: Colors.green));
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("✓ ${widget.taskStage} Evidence Saved with Permanent GPS Stamp!"), backgroundColor: Colors.green));
                   Navigator.pop(context);
                 }
               } catch (_) {}
@@ -822,11 +813,10 @@ jobs:
           }
           EOF
 
-          # Build Release APK
           flutter build apk --release --no-tree-shake-icons
 
       - name: Upload Finished APK
         uses: actions/upload-artifact@v4
         with:
-          name: HPL-Field-App-APK
+          name: HPL-Field-Team-APK
           path: hpl_field_app/build/app/outputs/flutter-apk/app-release.apk
