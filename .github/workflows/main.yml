@@ -24,7 +24,7 @@ jobs:
 
           flutter pub add http geolocator image_picker shared_preferences intl
 
-          # Disable lint checks that cause build failures on release builds
+          # Disable Android Release Lint
           echo "android.lint.abortOnError=false" >> android/gradle.properties
           echo "android.lint.checkReleaseBuilds=false" >> android/gradle.properties
 
@@ -58,6 +58,7 @@ jobs:
               <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
               <uses-permission android:name="android.permission.WAKE_LOCK"/>
               <uses-permission android:name="android.permission.CAMERA"/>
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
 
               <application
                   android:label="HPL FIELD TEAM"
@@ -92,6 +93,7 @@ jobs:
           import 'dart:async';
           import 'dart:convert';
           import 'dart:io';
+          import 'dart:ui' as ui;
           import 'package:flutter/material.dart';
           import 'package:geolocator/geolocator.dart';
           import 'package:image_picker/image_picker.dart';
@@ -104,6 +106,67 @@ jobs:
           void main() {
             WidgetsFlutterBinding.ensureInitialized();
             runApp(const MaterialApp(debugShowCheckedModeBanner: false, home: AppRoot()));
+          }
+
+          // HIGH-SPEED NATIVE WATERMARK ENGINE
+          Future<File> applyGpsWatermark({
+            required File originalFile,
+            required String gpName,
+            required String gpCode,
+            required String district,
+            required String block,
+            required double lat,
+            required double lng,
+          }) async {
+            try {
+              final bytes = await originalFile.readAsBytes();
+              final codec = await ui.instantiateImageCodec(bytes);
+              final frame = await codec.getNextFrame();
+              final img = frame.image;
+              final w = img.width;
+              final h = img.height;
+
+              final recorder = ui.PictureRecorder();
+              final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()));
+              canvas.drawImage(img, Offset.zero, Paint());
+
+              final bannerH = (h * 0.16).clamp(140.0, 320.0);
+              final bannerPaint = Paint()..color = const Color(0xDD000000);
+              canvas.drawRect(Rect.fromLTWH(0, h - bannerH, w.toDouble(), bannerH), bannerPaint);
+
+              final linePaint = Paint()..color = Colors.amber..strokeWidth = (bannerH * 0.025).clamp(3.0, 7.0);
+              canvas.drawLine(Offset(0, h - bannerH), Offset(w.toDouble(), h - bannerH), linePaint);
+
+              final timeStr = DateFormat('yyyy-MM-dd HH:mm:ss').format(DateTime.now());
+              final watermarkText = "HPL FIELD TEAM | TELECOM ROLLOUT\n"
+                  "SITE: $gpName (CODE: $gpCode)\n"
+                  "LOCATION: $district, $block\n"
+                  "GPS: ${lat.toStringAsFixed(6)}, ${lng.toStringAsFixed(6)}\n"
+                  "DATE/TIME: $timeStr";
+
+              final textStyle = ui.TextStyle(
+                color: const Color(0xFFFFFFFF),
+                fontSize: (bannerH * 0.13).clamp(13.0, 26.0),
+                fontWeight: ui.FontWeight.bold,
+              );
+              final pb = ui.ParagraphBuilder(ui.ParagraphStyle(textAlign: TextAlign.left, lineHeight: 1.35))
+                ..pushStyle(textStyle)
+                ..addText(watermarkText);
+
+              final paragraph = pb.build()..layout(ui.ParagraphConstraints(width: w.toDouble() - 40));
+              canvas.drawParagraph(paragraph, Offset(20, h - bannerH + 12));
+
+              final finalImg = await recorder.endRecording().toImage(w, h);
+              final byteData = await finalImg.toByteData(format: ui.ImageByteFormat.png);
+              if (byteData == null) return originalFile;
+
+              final outPath = '${originalFile.parent.path}/wm_${DateTime.now().millisecondsSinceEpoch}.png';
+              final outFile = File(outPath);
+              await outFile.writeAsBytes(byteData.buffer.asUint8List());
+              return outFile;
+            } catch (e) {
+              return originalFile;
+            }
           }
 
           class AppRoot extends StatefulWidget {
@@ -257,6 +320,7 @@ jobs:
               _fetchTasks();
               _fetchRealAttendance();
               _fetchChat();
+              _triggerPendingTasksSync();
             }
 
             @override
@@ -282,15 +346,10 @@ jobs:
                 });
               } catch (_) {}
 
-              const settings = LocationSettings(
-                accuracy: LocationAccuracy.high,
-                distanceFilter: 8,
-              );
-
               gpsStreamSub?.cancel();
-              gpsStreamSub = Geolocator.getPositionStream(locationSettings: settings).listen((Position pos) {
-                _onNewLocationSample(pos);
-              });
+              gpsStreamSub = Geolocator.getPositionStream(
+                locationSettings: const LocationSettings(accuracy: LocationAccuracy.high, distanceFilter: 8)
+              ).listen((Position pos) => _onNewLocationSample(pos));
 
               periodicBackupTimer?.cancel();
               periodicBackupTimer = Timer.periodic(const Duration(seconds: 30), (t) async {
@@ -320,7 +379,6 @@ jobs:
                 );
               }
 
-              // Only accumulate if moved >= 8 meters (accrues outward + return trip accurately)
               if (lastRecordedGps == null || delta >= 8.0) {
                 setState(() {
                   if (lastRecordedGps != null) {
@@ -397,7 +455,7 @@ jobs:
 
             void _punchInWithSelfie() async {
               final picker = ImagePicker();
-              final picked = await picker.pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front);
+              final picked = await picker.pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front, imageQuality: 70);
               if (picked == null) return;
 
               Position pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high));
@@ -421,10 +479,9 @@ jobs:
               }
             }
 
-            // PUNCH-OUT WITH MANDATORY VERIFICATION SELFIE
             void _punchOutWithSelfie() async {
               final picker = ImagePicker();
-              final picked = await picker.pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front);
+              final picked = await picker.pickImage(source: ImageSource.camera, preferredCameraDevice: CameraDevice.front, imageQuality: 70);
               if (picked == null) return;
 
               Position pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high));
@@ -444,10 +501,39 @@ jobs:
                   isDayCompleted = true;
                 });
                 ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                  content: Text("✓ Duty Ended with Selfie! Total Distance: ${_formatDistance(totalDistanceMeters)}"),
+                  content: Text("✓ Duty Ended with Selfie! Distance: ${_formatDistance(totalDistanceMeters)}"),
                   backgroundColor: Colors.blue,
                 ));
               }
+            }
+
+            void _triggerPendingTasksSync() async {
+              SharedPreferences p = await SharedPreferences.getInstance();
+              List<String> queue = p.getStringList('offline_task_queue') ?? [];
+              if (queue.isEmpty) return;
+
+              List<String> remaining = [];
+              for (String item in queue) {
+                try {
+                  var data = jsonDecode(item);
+                  var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/app_sync.php?action=submit_stage_execution"));
+                  Map<String, dynamic> f = data['fields'];
+                  f.forEach((k, v) => req.fields[k] = v.toString());
+
+                  Map<String, dynamic> photos = data['photos'];
+                  for (var e in photos.entries) {
+                    if (await File(e.value).exists()) {
+                      req.files.add(await http.MultipartFile.fromPath(e.key, e.value));
+                    }
+                  }
+
+                  var res = await req.send();
+                  if (res.statusCode != 200) remaining.add(item);
+                } catch (_) {
+                  remaining.add(item);
+                }
+              }
+              await p.setStringList('offline_task_queue', remaining);
             }
 
             String _formatDistance(double meters) {
@@ -488,9 +574,9 @@ jobs:
                 var j = jsonDecode(res.body);
                 if (j['status'] == true) {
                   setState(() {
-                    presentDays = j['present'];
-                    absentDays = j['absent'];
-                    leavesCount = j['leaves'];
+                    presentDays = j['present'] ?? 0;
+                    absentDays = j['absent'] ?? 0;
+                    leavesCount = j['leaves'] ?? 0;
                   });
                 }
               } catch (_) {}
@@ -537,6 +623,14 @@ jobs:
                   foregroundColor: Colors.white,
                   actions: [
                     IconButton(
+                      icon: const Icon(Icons.sync),
+                      tooltip: "Sync Offline Tasks",
+                      onPressed: () {
+                        _triggerPendingTasksSync();
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Syncing offline tasks & route...")));
+                      },
+                    ),
+                    IconButton(
                       icon: const Icon(Icons.logout),
                       onPressed: () async {
                         SharedPreferences p = await SharedPreferences.getInstance();
@@ -552,7 +646,7 @@ jobs:
                     _buildDutyTab(),
                     _buildTasksTab(),
                     _buildChatTab(),
-                    _buildAttendanceTab(),
+                    _buildHRTab(),
                   ],
                 ),
                 bottomNavigationBar: BottomNavigationBar(
@@ -565,7 +659,7 @@ jobs:
                     BottomNavigationBarItem(icon: Icon(Icons.camera_front), label: "Selfie Duty"),
                     BottomNavigationBarItem(icon: Icon(Icons.assignment), label: "My Tasks"),
                     BottomNavigationBarItem(icon: Icon(Icons.chat), label: "Team Chat"),
-                    BottomNavigationBarItem(icon: Icon(Icons.calendar_month), label: "Attendance"),
+                    BottomNavigationBarItem(icon: Icon(Icons.account_balance_wallet), label: "HR & Leaves"),
                   ],
                 ),
               );
@@ -589,7 +683,6 @@ jobs:
                             style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: isPunchedIn ? Colors.green : (isDayCompleted ? Colors.blue : Colors.red)),
                           ),
                           const SizedBox(height: 12),
-                          // Live Odometer Box (Forward + Return Distance)
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                             decoration: BoxDecoration(color: Colors.indigo.shade50, borderRadius: BorderRadius.circular(10), border: Border.all(color: Colors.indigo.shade200)),
@@ -697,6 +790,9 @@ jobs:
                                             taskId: int.tryParse(t['task_id']?.toString() ?? '0') ?? 0,
                                             gpId: int.tryParse(t['gp_id']?.toString() ?? '0') ?? 0,
                                             gpName: t['gp_name'] ?? 'Site',
+                                            gpCode: t['gp_code'] ?? '0000',
+                                            districtName: t['district_name'] ?? 'District',
+                                            blockName: t['block_name'] ?? 'Block',
                                             taskStage: t['task_type'] ?? 'Stage 1',
                                             userName: widget.userName,
                                           )));
@@ -762,7 +858,40 @@ jobs:
               );
             }
 
-            Widget _buildAttendanceTab() {
+            // HR, LEAVES & SALARY SLIPS TAB
+            Widget _buildHRTab() {
+              return DefaultTabController(
+                length: 3,
+                child: Column(
+                  children: [
+                    Container(
+                      color: Colors.white,
+                      child: const TabBar(
+                        labelColor: Colors.indigo,
+                        unselectedLabelColor: Colors.grey,
+                        indicatorColor: Colors.indigo,
+                        tabs: [
+                          Tab(text: "Attendance"),
+                          Tab(text: "Apply Leave"),
+                          Tab(text: "Salary Slips"),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: TabBarView(
+                        children: [
+                          _buildAttendanceView(),
+                          _buildApplyLeaveView(),
+                          _buildSalarySlipsView(),
+                        ],
+                      ),
+                    )
+                  ],
+                ),
+              );
+            }
+
+            Widget _buildAttendanceView() {
               return ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
@@ -789,15 +918,184 @@ jobs:
                 ],
               );
             }
+
+            Widget _buildApplyLeaveView() {
+              final reasonCtrl = TextEditingController();
+              String leaveType = "Casual Leave";
+              DateTime fromDate = DateTime.now();
+              DateTime toDate = DateTime.now().add(const Duration(days: 1));
+
+              return StatefulBuilder(
+                builder: (context, setLeaveState) {
+                  return ListView(
+                    padding: const EdgeInsets.all(16),
+                    children: [
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text("Submit Leave Application", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                              const SizedBox(height: 14),
+                              DropdownButtonFormField<String>(
+                                value: leaveType,
+                                decoration: const InputDecoration(labelText: "Leave Type", border: OutlineInputBorder()),
+                                items: ["Casual Leave", "Sick Leave", "Earned Leave", "Emergency Leave"]
+                                    .map((t) => DropdownMenuItem(value: t, child: Text(t)))
+                                    .toList(),
+                                onChanged: (v) => setLeaveState(() => leaveType = v!),
+                              ),
+                              const SizedBox(height: 12),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: OutlinedButton(
+                                      onPressed: () async {
+                                        var d = await showDatePicker(context: context, initialDate: fromDate, firstDate: DateTime.now().subtract(const Duration(days: 30)), lastDate: DateTime.now().add(const Duration(days: 90)));
+                                        if (d != null) setLeaveState(() => fromDate = d);
+                                      },
+                                      child: Text("From: ${DateFormat('dd-MMM-yyyy').format(fromDate)}", style: const TextStyle(fontSize: 12)),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Expanded(
+                                    child: OutlinedButton(
+                                      onPressed: () async {
+                                        var d = await showDatePicker(context: context, initialDate: toDate, firstDate: fromDate, lastDate: DateTime.now().add(const Duration(days: 90)));
+                                        if (d != null) setLeaveState(() => toDate = d);
+                                      },
+                                      child: Text("To: ${DateFormat('dd-MMM-yyyy').format(toDate)}", style: const TextStyle(fontSize: 12)),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              TextField(controller: reasonCtrl, maxLines: 3, decoration: const InputDecoration(labelText: "Reason for Leave", border: OutlineInputBorder())),
+                              const SizedBox(height: 16),
+                              SizedBox(
+                                width: double.infinity,
+                                height: 46,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(backgroundColor: Colors.indigo, foregroundColor: Colors.white),
+                                  onPressed: () async {
+                                    if (reasonCtrl.text.trim().isEmpty) {
+                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Please enter leave reason")));
+                                      return;
+                                    }
+                                    try {
+                                      var res = await http.post(
+                                        Uri.parse("$BASE_URL/field_app_api.php?action=apply_leave"),
+                                        body: {
+                                          'user_id': widget.userId.toString(),
+                                          'leave_type': leaveType,
+                                          'from_date': DateFormat('yyyy-MM-dd').format(fromDate),
+                                          'to_date': DateFormat('yyyy-MM-dd').format(toDate),
+                                          'reason': reasonCtrl.text.trim(),
+                                        },
+                                      );
+                                      var j = jsonDecode(res.body);
+                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(j['message'] ?? "Leave request submitted!"), backgroundColor: Colors.green));
+                                      reasonCtrl.clear();
+                                    } catch (e) {
+                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error: $e")));
+                                    }
+                                  },
+                                  child: const Text("SUBMIT LEAVE REQUEST"),
+                                ),
+                              )
+                            ],
+                          ),
+                        ),
+                      )
+                    ],
+                  );
+                },
+              );
+            }
+
+            Widget _buildSalarySlipsView() {
+              return FutureBuilder(
+                future: http.get(Uri.parse("$BASE_URL/field_app_api.php?action=get_salary_slips&user_id=${widget.userId}")),
+                builder: (ctx, snap) {
+                  if (snap.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (!snap.hasData || snap.data?.statusCode != 200) {
+                    return const Center(child: Text("No Salary Slips Available Yet"));
+                  }
+                  try {
+                    var j = jsonDecode(snap.data!.body);
+                    List slips = j['slips'] ?? [];
+                    if (slips.isEmpty) {
+                      return const Center(child: Text("No salary slips generated for your ID yet."));
+                    }
+                    return ListView.builder(
+                      padding: const EdgeInsets.all(16),
+                      itemCount: slips.length,
+                      itemBuilder: (c, idx) {
+                        var s = slips[idx];
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          child: Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(s['month_year'] ?? 'Month', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(color: Colors.green.shade100, borderRadius: BorderRadius.circular(4)),
+                                      child: Text(s['status'] ?? 'Paid', style: TextStyle(color: Colors.green.shade800, fontWeight: FontWeight.bold, fontSize: 11)),
+                                    )
+                                  ],
+                                ),
+                                const Divider(),
+                                Text("Basic Salary: ₹${s['basic_pay'] ?? '0'}", style: const TextStyle(fontSize: 13)),
+                                Text("Allowances (DA/TA): ₹${s['allowances'] ?? '0'}", style: const TextStyle(fontSize: 13)),
+                                Text("Deductions (PF/ESI): ₹${s['deductions'] ?? '0'}", style: const TextStyle(fontSize: 13, color: Colors.red)),
+                                const SizedBox(height: 6),
+                                Text("Net In-Hand Salary: ₹${s['net_salary'] ?? '0'}", style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.indigo)),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  } catch (e) {
+                    return const Center(child: Text("Unable to parse salary slips."));
+                  }
+                },
+              );
+            }
           }
 
+          // DYNAMIC EXECUTION SCREEN WITH OFFLINE DRAFT & CAMERA/GALLERY
           class StageExecutionScreen extends StatefulWidget {
             final int taskId;
             final int gpId;
             final String gpName;
+            final String gpCode;
+            final String districtName;
+            final String blockName;
             final String taskStage;
             final String userName;
-            const StageExecutionScreen({super.key, required this.taskId, required this.gpId, required this.gpName, required this.taskStage, required this.userName});
+
+            const StageExecutionScreen({
+              super.key,
+              required this.taskId,
+              required this.gpId,
+              required this.gpName,
+              required this.gpCode,
+              required this.districtName,
+              required this.blockName,
+              required this.taskStage,
+              required this.userName,
+            });
+
             @override
             State<StageExecutionScreen> createState() => _StageExecutionScreenState();
           }
@@ -806,63 +1104,217 @@ jobs:
             final Map<String, TextEditingController> ctrls = {};
             final Map<String, File?> photos = {};
             final remarksCtrl = TextEditingController();
-            bool saving = false;
+            bool isProcessing = false;
+
+            @override
+            void initState() {
+              super.initState();
+              _loadDraftFromLocalStorage();
+            }
+
+            void _loadDraftFromLocalStorage() async {
+              SharedPreferences p = await SharedPreferences.getInstance();
+              String? draft = p.getString('task_draft_${widget.taskId}');
+              if (draft != null) {
+                try {
+                  var data = jsonDecode(draft);
+                  Map<String, dynamic> f = data['fields'] ?? {};
+                  f.forEach((k, v) {
+                    if (k == 'remarks') {
+                      remarksCtrl.text = v.toString();
+                    } else {
+                      _getCtrl(k).text = v.toString();
+                    }
+                  });
+
+                  Map<String, dynamic> ph = data['photos'] ?? {};
+                  for (var e in ph.entries) {
+                    File fl = File(e.value.toString());
+                    if (fl.existsSync()) {
+                      photos[e.key] = fl;
+                    }
+                  }
+                  setState(() {});
+                } catch (_) {}
+              }
+            }
+
+            void _saveDraftToLocalStorage() async {
+              SharedPreferences p = await SharedPreferences.getInstance();
+              Map<String, String> f = {};
+              ctrls.forEach((k, v) => f[k] = v.text);
+              f['remarks'] = remarksCtrl.text;
+
+              Map<String, String> ph = {};
+              photos.forEach((k, v) {
+                if (v != null) ph[k] = v.path;
+              });
+
+              await p.setString('task_draft_${widget.taskId}', jsonEncode({'fields': f, 'photos': ph}));
+            }
 
             TextEditingController _getCtrl(String key) {
               ctrls.putIfAbsent(key, () => TextEditingController());
               return ctrls[key]!;
             }
 
-            Future<void> _capture(String tag) async {
+            // MODAL SHEET TO CHOOSE CAMERA OR GALLERY
+            void _selectImageOption(String tag) {
+              showModalBottomSheet(
+                context: context,
+                shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+                builder: (ctx) => SafeArea(
+                  child: Wrap(
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.camera_alt, color: Colors.indigo),
+                        title: const Text("Take Live Photo (Front/Back Camera)"),
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _captureAndWatermark(tag, ImageSource.camera);
+                        },
+                      ),
+                      ListTile(
+                        leading: const Icon(Icons.photo_library, color: Colors.green),
+                        title: const Text("Upload from Gallery (Saved Photo)"),
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _captureAndWatermark(tag, ImageSource.gallery);
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }
+
+            Future<void> _captureAndWatermark(String tag, ImageSource src) async {
               final picker = ImagePicker();
-              final picked = await picker.pickImage(source: ImageSource.camera, imageQuality: 82);
+              // Resize to 1280 to ensure lightning-fast upload & avoid HTTP payload timeout
+              final picked = await picker.pickImage(source: src, imageQuality: 70, maxWidth: 1280, maxHeight: 1280);
               if (picked != null) {
-                setState(() => photos[tag] = File(picked.path));
+                setState(() => isProcessing = true);
+                Position pos;
+                try {
+                  pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high));
+                } catch (_) {
+                  pos = Position(longitude: 0.0, latitude: 0.0, timestamp: DateTime.now(), accuracy: 0.0, altitude: 0.0, heading: 0.0, speed: 0.0, speedAccuracy: 0.0, altitudeAccuracy: 0.0, headingAccuracy: 0.0);
+                }
+
+                File watermarked = await applyGpsWatermark(
+                  originalFile: File(picked.path),
+                  gpName: widget.gpName,
+                  gpCode: widget.gpCode,
+                  district: widget.districtName,
+                  block: widget.blockName,
+                  lat: pos.latitude,
+                  lng: pos.longitude,
+                );
+
+                setState(() {
+                  photos[tag] = watermarked;
+                  isProcessing = false;
+                });
+                _saveDraftToLocalStorage();
               }
             }
 
             void _submit() async {
-              setState(() => saving = true);
-              Position pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high));
-              var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/app_sync.php?action=submit_stage_execution"));
-              req.fields['task_id'] = widget.taskId.toString();
-              req.fields['gp_id'] = widget.gpId.toString();
-              req.fields['stage_type'] = widget.taskStage;
-              req.fields['user_name'] = widget.userName;
-              req.fields['latitude'] = pos.latitude.toString();
-              req.fields['longitude'] = pos.longitude.toString();
-              req.fields['remarks'] = remarksCtrl.text;
-
-              ctrls.forEach((k, v) { req.fields[k] = v.text; });
-              for (var entry in photos.entries) {
-                if (entry.value != null) {
-                  req.files.add(await http.MultipartFile.fromPath(entry.key, entry.value!.path));
-                }
+              setState(() => isProcessing = true);
+              Position pos;
+              try {
+                pos = await Geolocator.getCurrentPosition(locationSettings: const LocationSettings(accuracy: LocationAccuracy.high));
+              } catch (_) {
+                pos = Position(longitude: 0.0, latitude: 0.0, timestamp: DateTime.now(), accuracy: 0.0, altitude: 0.0, heading: 0.0, speed: 0.0, speedAccuracy: 0.0, altitudeAccuracy: 0.0, headingAccuracy: 0.0);
               }
 
+              Map<String, String> f = {
+                'task_id': widget.taskId.toString(),
+                'gp_id': widget.gpId.toString(),
+                'stage_type': widget.taskStage,
+                'user_name': widget.userName,
+                'latitude': pos.latitude.toString(),
+                'longitude': pos.longitude.toString(),
+                'remarks': remarksCtrl.text,
+              };
+              ctrls.forEach((k, v) => f[k] = v.text);
+
+              Map<String, String> ph = {};
+              photos.forEach((k, v) {
+                if (v != null) ph[k] = v.path;
+              });
+
+              bool uploadedOnline = false;
               try {
-                var res = await req.send();
+                var req = http.MultipartRequest("POST", Uri.parse("$BASE_URL/app_sync.php?action=submit_stage_execution"));
+                f.forEach((k, v) => req.fields[k] = v);
+                for (var entry in photos.entries) {
+                  if (entry.value != null && await entry.value!.exists()) {
+                    req.files.add(await http.MultipartFile.fromPath(entry.key, entry.value!.path));
+                  }
+                }
+
+                var res = await req.send().timeout(const Duration(seconds: 45));
                 if (res.statusCode == 200) {
-                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("✓ ${widget.taskStage} Evidence Saved with Permanent GPS Stamp!"), backgroundColor: Colors.green));
+                  uploadedOnline = true;
+                  SharedPreferences p = await SharedPreferences.getInstance();
+                  await p.remove('task_draft_${widget.taskId}');
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("✓ ${widget.taskStage} Submitted with Full GPS Watermark!"), backgroundColor: Colors.green));
+                    Navigator.pop(context);
+                  }
+                }
+              } catch (_) {
+                uploadedOnline = false;
+              }
+
+              // IF NETWORK IS OFF OR FAILED: SAVE INTO OFFLINE SUBMISSIONS QUEUE
+              if (!uploadedOnline) {
+                SharedPreferences p = await SharedPreferences.getInstance();
+                List<String> queue = p.getStringList('offline_task_queue') ?? [];
+                queue.add(jsonEncode({'fields': f, 'photos': ph}));
+                await p.setStringList('offline_task_queue', queue);
+                await p.remove('task_draft_${widget.taskId}');
+
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text("✓ No/Slow Internet! Saved to Offline Queue. Will sync automatically."),
+                    backgroundColor: Colors.orange,
+                  ));
                   Navigator.pop(context);
                 }
-              } catch (_) {}
-              setState(() => saving = false);
+              }
+              setState(() => isProcessing = false);
             }
 
             @override
             Widget build(BuildContext context) {
               return Scaffold(
                 appBar: AppBar(title: Text(widget.gpName), backgroundColor: Colors.indigo, foregroundColor: Colors.white),
-                body: saving 
-                  ? const Center(child: CircularProgressIndicator())
+                body: isProcessing 
+                  ? const Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          CircularProgressIndicator(),
+                          SizedBox(height: 14),
+                          Text("Watermarking & Securing Data...", style: TextStyle(fontWeight: FontWeight.bold))
+                        ],
+                      ),
+                    )
                   : ListView(
                       padding: const EdgeInsets.all(16),
                       children: [
                         Container(
                           padding: const EdgeInsets.all(10),
                           decoration: BoxDecoration(color: Colors.indigo.shade50, borderRadius: BorderRadius.circular(8)),
-                          child: Text("Executing: ${widget.taskStage}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text("Executing: ${widget.taskStage}", style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
+                              Text("${widget.districtName} > ${widget.blockName} (GP Code: ${widget.gpCode})", style: const TextStyle(fontSize: 11, color: Colors.black54)),
+                            ],
+                          ),
                         ),
                         const SizedBox(height: 14),
 
@@ -891,132 +1343,4 @@ jobs:
                           _photoTile('Copper_Busbar_Strip', '2. Copper Busbar Strip Photo *'),
                           _photoTile('Earthing_Strip_Termination', '3. Connected Earthing Strip Termination Photo *'),
                         ]
-                        // STAGE 4: SOLAR INSTALLATION
-                        else if (widget.taskStage.contains('Stage 4') || widget.taskStage.contains('Solar')) ...[
-                          _snWithPhoto('solar_panel_1', 'photo_solar_panel_1', '1. Solar Panel 1 Serial Number *'),
-                          _snWithPhoto('solar_panel_2', 'photo_solar_panel_2', '2. Solar Panel 2 Serial Number *'),
-                          _photoTile('Solar_Mounting_Structure', '3. Solar Mounting Structure on Roof Photo *'),
-                          _photoTile('Civil_Concrete_Pedestal', '4. Civil Concrete Pedestal Work Photo *'),
-                          _photoTile('Solar_Earthing_Pit', '5. Dedicated Solar Earthing Pit Photo *'),
-                        ]
-                        // STAGE 5: INTEGRATION & SFPS
-                        else if (widget.taskStage.contains('Stage 5') || widget.taskStage.contains('Integration')) ...[
-                          _photoTile('Engineer_Selfie_Rack', '1. Field Engineer Verification Selfie with Rack *'),
-                          _snWithPhoto('sfp_1', 'photo_sfp_electrical', '2. SFP 1 Electrical (Copper) SN *'),
-                          _snWithPhoto('sfp_2', 'photo_sfp_optical_1', '3. SFP 2 Optical (LR/ER) SN *'),
-                          _snWithPhoto('sfp_3', 'photo_sfp_optical_2', '4. SFP 3 Optical (LR/ER) SN *'),
-                          _photoTile('Bypass_Filter_Patching', '5. Bypass Filter Patching Photo *'),
-                          _photoTile('Optical_Patch_Cord_Dressing', '6. Optical Fiber Patch Cord Dressing Photo *'),
-                          _photoTile('Router_LED_Link_Ping', '7. Router LED Port Link Status & Active Ping Photo *'),
-                        ]
-                        // STAGE 6: FAT / FINAL AT HANDOVER
-                        else ...[
-                          const Text("A. Joint Inspection & Structure Evidence", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
-                          _photoTile('Joint_Selfie_With_BSNL_Officer', '1. Joint Selfie with BSNL / IE Officer (FT/NE Team) *'),
-                          _photoTile('Khuli_Rack_Upper_Half', '2. Khuli Rack Upper Half Compartment Photo *'),
-                          _photoTile('Khuli_Rack_Lower_Half', '3. Khuli Rack Lower Half Compartment Photo *'),
-                          _photoTile('Band_Rack_Front_Closed', '4. Band Rack Front Profile (Closed) Photo *'),
-                          _photoTile('Foundation_Grouting_Base', '5. Foundation Grouting Base Photo *'),
-                          const Divider(),
-                          const Text("B. Fresh Retakes on FAT Date (GPS Watermark)", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
-                          _photoTile('FAT_Retake_Router_Chassis', '6. Re-take: Router Chassis Plate Photo *'),
-                          _photoTile('FAT_Retake_EMS_SN', '7. Re-take: EMS SN Plate Photo *'),
-                          _photoTile('FAT_Retake_HUPS_SN', '8. Re-take: HUPS SN Plate Photo *'),
-                          _photoTile('FAT_Retake_Inverter_SN', '9. Re-take: Inverter SN Plate Photo *'),
-                          _photoTile('FAT_Retake_Rectifier_1_2', '10. Re-take: Rectifier Modules 1 & 2 Photos *'),
-                          _photoTile('FAT_Retake_Battery_Bank', '11. Re-take: Battery Bank SN Photo *'),
-                          _photoTile('FAT_Retake_Bypass_Filter', '12. Re-take: Bypass Filter SN Photo *'),
-                          _photoTile('FAT_Retake_Rack_SN', '13. Re-take: Rack SN Plate Photo *'),
-                          _photoTile('FAT_Retake_Earthing_Pit', '14. Re-take: Earth Electrode Pit Photo *'),
-                          _photoTile('FAT_Retake_Busbar_Strip', '15. Re-take: Copper Busbar Strip Photo *'),
-                          _photoTile('FAT_Retake_Solar_Panels', '16. Re-take: Solar Panels 1 & 2 Photos (If Solar)'),
-                          _photoTile('FAT_Retake_Solar_Mounting', '17. Re-take: Solar Mounting Structure on Roof (If Solar)'),
-                          _photoTile('FAT_Retake_SFPs_Patching', '18. Re-take: SFPs & Patching Routing Photo *'),
-                          _photoTile('FAT_Retake_Router_LED_Link', '19. Re-take: Router LED Link & Active Ping Photo *'),
-                          const Divider(),
-                          const Text("C. Testing, Sensor Alarms & Official Handover", style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo)),
-                          _photoTile('Earthing_Meter_Ohm_Reading', '20. Earth Resistance Tester (Ohm Reading on Display) *'),
-                          Padding(
-                            padding: const EdgeInsets.only(bottom: 8),
-                            child: TextField(controller: _getCtrl('earth_resistance_ohm'), decoration: const InputDecoration(labelText: "Measured Earth Resistance in Ohms (< 0.5 Ω) *", border: OutlineInputBorder())),
-                          ),
-                          _photoTile('Smoke_Detector_Alarm_Test', '21. Smoke Detector Alarm Test Photo *'),
-                          _photoTile('Water_Ingress_Sensor_Test', '22. Water Ingress / Moisture Sensor Photo *'),
-                          _photoTile('Door_Tamper_Alarm_Test', '23. Rack Door Close / Tamper Alarm Photo *'),
-                          _photoTile('Noise_Meter_Ambient_Reading', '24. Ambient Sound Level / Noise Meter (dB Reading) *'),
-                          _photoTile('Signed_WCC_Handover_Document', '25. Signed WCC / Handover Document Copy Photo *'),
-                        ],
-
-                        const SizedBox(height: 12),
-                        TextField(controller: remarksCtrl, decoration: const InputDecoration(labelText: "Task Remarks / Site Note", border: OutlineInputBorder())),
-                        const SizedBox(height: 20),
-                        SizedBox(
-                          height: 50,
-                          child: ElevatedButton.icon(
-                            onPressed: _submit,
-                            icon: const Icon(Icons.cloud_upload),
-                            label: const Text("SUBMIT STAGE WITH GPS WATERMARK", style: TextStyle(fontWeight: FontWeight.bold)),
-                            style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
-                          ),
-                        )
-                      ],
-                    ),
-              );
-            }
-
-            Widget _snWithPhoto(String snKey, String photoTag, String label) {
-              bool done = photos[photoTag] != null;
-              return Card(
-                margin: const EdgeInsets.only(bottom: 10),
-                child: Padding(
-                  padding: const EdgeInsets.all(10),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(label, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                      const SizedBox(height: 6),
-                      TextField(controller: _getCtrl(snKey), decoration: const InputDecoration(hintText: "Enter Serial Number", isDense: true, border: OutlineInputBorder())),
-                      const SizedBox(height: 8),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(done ? "✓ Barcode Photo Attached" : "Capture Barcode Photo (GPS)", style: TextStyle(fontSize: 11, color: done ? Colors.green : Colors.grey)),
-                          ElevatedButton.icon(
-                            style: ElevatedButton.styleFrom(backgroundColor: done ? Colors.green : Colors.indigo, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
-                            onPressed: () => _capture(photoTag),
-                            icon: const Icon(Icons.camera_alt, size: 14),
-                            label: Text(done ? "Retake" : "Capture", style: const TextStyle(fontSize: 11)),
-                          ),
-                        ],
-                      )
-                    ],
-                  ),
-                ),
-              );
-            }
-
-            Widget _photoTile(String tag, String title) {
-              bool done = photos[tag] != null;
-              return Card(
-                margin: const EdgeInsets.only(bottom: 8),
-                child: ListTile(
-                  leading: Icon(done ? Icons.check_circle : Icons.camera_alt, color: done ? Colors.green : Colors.grey),
-                  title: Text(title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-                  trailing: ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: done ? Colors.green : Colors.indigo, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4)),
-                    onPressed: () => _capture(tag),
-                    child: Text(done ? "Retake" : "Capture", style: const TextStyle(fontSize: 11)),
-                  ),
-                ),
-              );
-            }
-          }
-          EOF_DART
-
-          flutter build apk --release --no-tree-shake-icons
-
-      - name: Upload Finished APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: HPL-Field-Team-APK
-          path: hpl_field_app/build/app/outputs/flutter-apk/app-release.apk
+                      
