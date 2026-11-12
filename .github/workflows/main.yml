@@ -101,6 +101,7 @@ jobs:
           import 'package:shared_preferences/shared_preferences.dart';
           import 'package:intl/intl.dart';
 
+          // CORRECT ERP API PATH
           const String BASE_URL = "https://hplinfra.com/erp/api";
 
           void main() {
@@ -108,7 +109,6 @@ jobs:
             runApp(const MaterialApp(debugShowCheckedModeBanner: false, home: AppRoot()));
           }
 
-          // HIGH-SPEED NATIVE WATERMARK ENGINE
           Future<File> applyGpsWatermark({
             required File originalFile,
             required String gpName,
@@ -379,6 +379,7 @@ jobs:
                 );
               }
 
+              // Odometer: 200m forward + 200m return = 400m
               if (lastRecordedGps == null || delta >= 8.0) {
                 setState(() {
                   if (lastRecordedGps != null) {
@@ -858,7 +859,6 @@ jobs:
               );
             }
 
-            // HR, LEAVES & SALARY SLIPS TAB
             Widget _buildHRTab() {
               return DefaultTabController(
                 length: 3,
@@ -1073,7 +1073,6 @@ jobs:
             }
           }
 
-          // DYNAMIC EXECUTION SCREEN WITH OFFLINE DRAFT & CAMERA/GALLERY
           class StageExecutionScreen extends StatefulWidget {
             final int taskId;
             final int gpId;
@@ -1158,7 +1157,6 @@ jobs:
               return ctrls[key]!;
             }
 
-            // MODAL SHEET TO CHOOSE CAMERA OR GALLERY
             void _selectImageOption(String tag) {
               showModalBottomSheet(
                 context: context,
@@ -1190,7 +1188,6 @@ jobs:
 
             Future<void> _captureAndWatermark(String tag, ImageSource src) async {
               final picker = ImagePicker();
-              // Resize to 1280 to ensure lightning-fast upload & avoid HTTP payload timeout
               final picked = await picker.pickImage(source: src, imageQuality: 70, maxWidth: 1280, maxHeight: 1280);
               if (picked != null) {
                 setState(() => isProcessing = true);
@@ -1268,7 +1265,6 @@ jobs:
                 uploadedOnline = false;
               }
 
-              // IF NETWORK IS OFF OR FAILED: SAVE INTO OFFLINE SUBMISSIONS QUEUE
               if (!uploadedOnline) {
                 SharedPreferences p = await SharedPreferences.getInstance();
                 List<String> queue = p.getStringList('offline_task_queue') ?? [];
